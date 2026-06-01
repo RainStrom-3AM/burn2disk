@@ -30,7 +30,12 @@ import kotlin.random.Random
  * vertical sine wobble.
  */
 @Composable
-fun SandstormUsb(modifier: Modifier = Modifier) {
+fun SandstormUsb(
+    modifier: Modifier = Modifier,
+    boxSize: androidx.compose.ui.unit.Dp = 200.dp,
+    iconSize: androidx.compose.ui.unit.Dp = 96.dp,
+    showParticles: Boolean = true
+) {
     val transition = rememberInfiniteTransition(label = "sandstorm")
     val phase by transition.animateFloat(
         initialValue = 0f,
@@ -55,21 +60,23 @@ fun SandstormUsb(modifier: Modifier = Modifier) {
         }
     }
 
-    Box(modifier = modifier.size(200.dp), contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.size(200.dp)) {
-            val w = size.width
-            val h = size.height
-            for (p in particles) {
-                val t = (phase * p.speed + p.offsetPhase) % 1f
-                val x = t * w
-                val baseY = p.laneY * h
-                val y = baseY + sin((t + p.offsetPhase) * 6.28318f).toFloat() * p.wobble
-                drawCircle(
-                    color = if (p.radius > 3f) Amber else AmberDim,
-                    radius = p.radius,
-                    center = Offset(x, y),
-                    alpha = (0.5f + 0.5f * (1f - kotlin.math.abs(0.5f - t) * 2f)).coerceIn(0f, 1f)
-                )
+    Box(modifier = modifier.size(boxSize), contentAlignment = Alignment.Center) {
+        if (showParticles) {
+            Canvas(modifier = Modifier.size(boxSize)) {
+                val w = size.width
+                val h = size.height
+                for (p in particles) {
+                    val t = (phase * p.speed + p.offsetPhase) % 1f
+                    val x = t * w
+                    val baseY = p.laneY * h
+                    val y = baseY + sin((t + p.offsetPhase) * 6.28318f).toFloat() * p.wobble
+                    drawCircle(
+                        color = if (p.radius > 3f) Amber else AmberDim,
+                        radius = p.radius,
+                        center = Offset(x, y),
+                        alpha = (0.5f + 0.5f * (1f - kotlin.math.abs(0.5f - t) * 2f)).coerceIn(0f, 1f)
+                    )
+                }
             }
         }
 
@@ -77,7 +84,7 @@ fun SandstormUsb(modifier: Modifier = Modifier) {
             imageVector = Icons.Filled.Usb,
             contentDescription = "USB drive",
             tint = Amber,
-            modifier = Modifier.size(96.dp)
+            modifier = Modifier.size(iconSize)
         )
     }
 }
