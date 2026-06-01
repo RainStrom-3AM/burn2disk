@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Foreground: an amber USB drive with sand lines blowing across it.
+     Drawn within the 108x108 adaptive-icon canvas; the central 72x72 is the safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- USB drive body -->
+    <path
+        android:fillColor="#E8A020"
+        android:pathData="M46,38 h22 a4,4 0 0 1 4,4 v36 a4,4 0 0 1 -4,4 h-22 a4,4 0 0 1 -4,-4 v-36 a4,4 0 0 1 4,-4 z" />
+
+    <!-- USB metal connector -->
+    <path
+        android:fillColor="#C9C9C9"
+        android:pathData="M50,28 h14 v10 h-14 z" />
+    <path
+        android:fillColor="#9A9A9A"
+        android:pathData="M52,30 h4 v6 h-4 z M58,30 h4 v6 h-4 z" />
+
+    <!-- Cap detail line on the body -->
+    <path
+        android:fillColor="#1A1209"
+        android:pathData="M46,68 h22 v3 h-22 z" />
+
+    <!-- Sand / wind lines blowing across -->
+    <path
+        android:strokeColor="#E8A020"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M18,46 h18" />
+    <path
+        android:strokeColor="#D98A12"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M14,56 h26" />
+    <path
+        android:strokeColor="#E8A020"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M20,66 h16" />
+    <path
+        android:strokeColor="#D98A12"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M74,50 h16" />
+    <path
+        android:strokeColor="#E8A020"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M76,62 h14" />
+
+    <!-- Floating sand particles -->
+    <path android:fillColor="#E8A020" android:pathData="M40,44 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+    <path android:fillColor="#D98A12" android:pathData="M38,72 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+    <path android:fillColor="#E8A020" android:pathData="M72,72 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+    <path android:fillColor="#D98A12" android:pathData="M70,42 m-1.5,0 a1.5,1.5 0 1,0 3,0 a1.5,1.5 0 1,0 -3,0" />
+</vector>

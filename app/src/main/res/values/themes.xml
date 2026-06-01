@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-only theme. The Compose Material3 theme drives colors at runtime;
+         this XML theme only seeds the window/splash background and status bar. -->
+    <style name="Theme.Burn2Disk" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#0D0D0D</item>
+        <item name="android:navigationBarColor">#0D0D0D</item>
+        <item name="android:windowBackground">#0D0D0D</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

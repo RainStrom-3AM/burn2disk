@@ -1,0 +1,201 @@
+package com.burnto.disk.ui.screens
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.burnto.disk.data.model.BurnState
+import com.burnto.disk.ui.Format
+import com.burnto.disk.ui.components.BurnLog
+import com.burnto.disk.ui.components.CircularBurnProgress
+import com.burnto.disk.ui.theme.Amber
+import com.burnto.disk.ui.theme.DangerRed
+import com.burnto.disk.ui.theme.MonoText
+import com.burnto.disk.ui.theme.NearBlack
+import com.burnto.disk.ui.theme.TextSecondary
+import com.burnto.disk.viewmodel.BurnViewModel
+
+/**
+ * Screen 5 — Burn progress. Full-screen circular progress, current-operation
+ * label, throughput/ETA stats, collapsible auto-scrolling log, and a guarded
+ * cancel button. The screen is kept awake by the host activity.
+ */
+@Composable
+fun BurnProgressScreen(
+    onComplete: () -> Unit,
+    viewModel: BurnViewModel = hiltViewModel()
+) {
+    val state by viewModel.burnState.collectAsStateWithLifecycle()
+    val iso by viewModel.iso.collectAsStateWithLifecycle()
+    val device by viewModel.selectedDevice.collectAsStateWithLifecycle()
+    val logLines by viewModel.logLines.collectAsStateWithLifecycle()
+
+    var logExpanded by remember { mutableStateOf(false) }
+    var showCancelDialog by remember { mutableStateOf(false) }
+
+    // Start the burn once when entering the screen.
+    LaunchedEffect(Unit) { viewModel.startBurn() }
+
+    // Navigate to the result screen on terminal states.
+    LaunchedEffect(state) {
+        if (state is BurnState.Success || state is BurnState.Failed) {
+            onComplete()
+        }
+    }
+
+    val (percent, label, isIndeterminate) = when (val s = state) {
+        is BurnState.Idle -> Triple(0, "Preparing...", true)
+        is BurnState.Formatting -> Triple(s.progress, "Formatting FAT32...", false)
+        is BurnState.Copying -> Triple(
+            s.percent,
+            "Writing files... ${Format.bytes(s.bytesWritten)} of ${Format.bytes(s.totalBytes)}",
+            false
+        )
+        is BurnState.Verifying -> Triple(s.progress, "Verifying...", false)
+        is BurnState.Success -> Triple(100, "Complete", false)
+        is BurnState.Failed -> Triple(0, "Failed", false)
+    }
+
+    Scaffold(containerColor = NearBlack) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(24.dp))
+
+            // ISO -> device header with arrow.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = iso?.fileName?.take(18) ?: "ISO",
+                    style = MonoText.small,
+                    color = Amber,
+                    maxLines = 1
+                )
+                Spacer(Modifier.size(8.dp))
+                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = TextSecondary)
+                Spacer(Modifier.size(8.dp))
+                Text(
+                    text = device?.displayName?.take(18) ?: "USB",
+                    style = MonoText.small,
+                    color = Color.White,
+                    maxLines = 1
+                )
+            }
+
+            Spacer(Modifier.height(40.dp))
+
+            CircularBurnProgress(
+                percent = percent,
+                isSuccess = state is BurnState.Success,
+                isIndeterminate = isIndeterminate
+            )
+
+            Spacer(Modifier.height(32.dp))
+
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White,
+                fontWeight = FontWeight.Medium
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            // Stats row.
+            if (state is BurnState.Copying) {
+                val s = state as BurnState.Copying
+                Text(
+                    text = "${Format.speedMBps(s.speedMBps)} · ${Format.eta(s.remainingSeconds)}",
+                    style = MonoText.medium,
+                    color = TextSecondary
+                )
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            BurnLog(
+                lines = logLines,
+                expanded = logExpanded,
+                onToggle = { logExpanded = !logExpanded }
+            )
+
+            Spacer(Modifier.weight(1f))
+
+            OutlinedButton(
+                onClick = { showCancelDialog = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(bottom = 0.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = DangerRed),
+                border = androidx.compose.foundation.BorderStroke(1.5.dp, DangerRed)
+            ) {
+                Text("CANCEL", fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    if (showCancelDialog) {
+        AlertDialog(
+            onDismissRequest = { showCancelDialog = false },
+            containerColor = com.burnto.disk.ui.theme.SurfaceDark,
+            title = { Text("Cancel burn?", color = Color.White) },
+            text = {
+                Text(
+                    "Cancel burn? USB may be left in an unusable state.",
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showCancelDialog = false
+                    viewModel.cancelBurn()
+                }) {
+                    Text("CANCEL BURN", color = DangerRed, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCancelDialog = false }) {
+                    Text("CONTINUE", color = Amber)
+                }
+            }
+        )
+    }
+}
