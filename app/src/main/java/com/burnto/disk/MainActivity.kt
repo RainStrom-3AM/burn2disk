@@ -79,6 +79,7 @@ private fun AppNavHost(
                     onSelectIso = { navController.navigate(Routes.ISO_SOURCE) },
                     onDownloadIso = { navController.navigate(Routes.ISO_SOURCE) },
                     onFormatDisk = { vm.formatDisk() },
+                    onDiagnoseUsb = { vm.diagnoseUsb() },
                     viewModel = vm
                 )
             }

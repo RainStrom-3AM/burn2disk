@@ -11,6 +11,7 @@ import java.nio.ByteOrder
  */
 data class FatGeometry(
     val partitionStartLba: Long,
+    val partitionSectors: Long,
     val bytesPerSector: Int,
     val sectorsPerCluster: Int,
     val reservedSectors: Int,
@@ -151,6 +152,7 @@ class Fat32Formatter(
         val fat2StartLba = fatStartLba + fatSizeSectors
         return FatGeometry(
             partitionStartLba = partitionStartLba,
+            partitionSectors = partitionSectors,
             bytesPerSector = bytesPerSector,
             sectorsPerCluster = sectorsPerCluster,
             reservedSectors = RESERVED_SECTORS,
@@ -250,6 +252,48 @@ class Fat32Formatter(
         return b.array()
     }
 
+    /**
+     * Builds the FAT32 boot sector from an existing [FatGeometry] (used by the
+     * post-burn boot-sector verify+rewrite recovery). Produces the same layout as
+     * [buildBootSector] but reads field values from [geo] instead of recomputing.
+     */
+    fun buildPublicBootSector(geo: FatGeometry, volumeLabel: String): ByteArray {
+        val bps = geo.bytesPerSector
+        val b = ByteBuffer.allocate(bps).order(ByteOrder.LITTLE_ENDIAN)
+
+        b.put(0, 0xEB.toByte()); b.put(1, 0x58.toByte()); b.put(2, 0x90.toByte())
+        putString(b, 3, "MSWIN4.1", 8)
+
+        b.putShort(11, bps.toShort())
+        b.put(13, geo.sectorsPerCluster.toByte())
+        b.putShort(14, geo.reservedSectors.toShort())
+        b.put(16, geo.numFats.toByte())
+        b.putShort(17, 0)
+        b.putShort(19, 0)
+        b.put(21, 0xF8.toByte())
+        b.putShort(22, 0)
+        b.putShort(24, 63)
+        b.putShort(26, 255)
+        b.putInt(28, geo.partitionStartLba.toInt())
+        b.putInt(32, geo.partitionSectors.toInt())
+
+        b.putInt(36, geo.fatSizeSectors.toInt())
+        b.putShort(40, 0)
+        b.putShort(42, 0)
+        b.putInt(44, geo.rootCluster.toInt())
+        b.putShort(48, FSINFO_SECTOR.toShort())
+        b.putShort(50, BACKUP_BOOT_SECTOR.toShort())
+        b.put(64, 0x80.toByte())
+        b.put(66, 0x29.toByte())
+        b.putInt(67, generateVolumeId())
+        putString(b, 71, normalizeLabel(volumeLabel), 11)
+        putString(b, 82, "FAT32   ", 8)
+
+        b.put(510, 0x55.toByte())
+        b.put(511, 0xAA.toByte())
+        return b.array()
+    }
+
     private fun buildFsInfo(clusterCount: Long): ByteArray {
         val b = ByteBuffer.allocate(blockSize).order(ByteOrder.LITTLE_ENDIAN)
         b.putInt(0, 0x41615252)                 // "RRaA"
@@ -274,6 +318,13 @@ class Fat32Formatter(
         bytesPerSector: Int,
         onProgress: (Int) -> Unit
     ) {
+        // Guard: the FAT region must begin after the reserved area (boot sector at
+        // partitionStartLba, FSInfo, backup boot at +6). RESERVED_SECTORS=32, so
+        // FAT1 starts at +32 — well clear of the boot sector. Catch any off-by-one.
+        val fatStartCheck = partitionStartLba + RESERVED_SECTORS
+        require(fatStartCheck >= partitionStartLba + 2) {
+            "FAT start overlaps boot sector! fatStart=$fatStartCheck partition=$partitionStartLba"
+        }
         val burstSectors = (MAX_BURST_BYTES / bytesPerSector).coerceAtLeast(1)
         val zero = ByteBuffer.allocate(burstSectors * bytesPerSector)
         val totalSectors = fatSizeSectors * NUM_FATS

@@ -111,6 +111,109 @@ class BurnEngine @Inject constructor(
         _state.value = BurnState.Idle
     }
 
+    /**
+     * Reads key on-disk structures from the USB and returns a human-readable
+     * diagnostic report (MBR, boot sector, FAT head, root dir). Read-only — never
+     * writes to the device. Used by the Home-screen "Diagnose USB" tool to pin
+     * down exactly which sector is wrong when a burned drive won't mount.
+     */
+    suspend fun diagnose(deviceId: Int): String = withContext(Dispatchers.IO) {
+        val sb = StringBuilder()
+        var raw: RawUsbBlockDevice? = null
+        try {
+            val msd = usbDeviceManager.findRawDeviceById(deviceId)
+                ?: return@withContext "No USB device found. Connect a drive via OTG."
+            val usbDevice = msd.usbDevice
+            if (!usbDeviceManager.requestPermission(usbDevice)) {
+                return@withContext "USB permission denied."
+            }
+            raw = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
+            val bs = raw.blockDevice.blockSize
+            val blocks = raw.blockDevice.blocks
+            val cap = blocks * bs.toLong()
+
+            fun hex(b: Int) = String.format("%02X", b and 0xFF)
+            fun readSector(lba: Long): ByteBuffer {
+                val buf = ByteBuffer.allocate(bs)
+                raw!!.blockDevice.read(lba, buf)
+                buf.position(0)
+                return buf
+            }
+            fun le32(buf: ByteBuffer, off: Int): Long {
+                return ((buf.get(off).toLong() and 0xFF)) or
+                    ((buf.get(off + 1).toLong() and 0xFF) shl 8) or
+                    ((buf.get(off + 2).toLong() and 0xFF) shl 16) or
+                    ((buf.get(off + 3).toLong() and 0xFF) shl 24)
+            }
+            fun le16(buf: ByteBuffer, off: Int): Int {
+                return (buf.get(off).toInt() and 0xFF) or ((buf.get(off + 1).toInt() and 0xFF) shl 8)
+            }
+            fun hexRange(buf: ByteBuffer, from: Int, to: Int): String {
+                val parts = ArrayList<String>()
+                for (i in from..to) parts.add(hex(buf.get(i).toInt()))
+                return parts.joinToString(" ")
+            }
+
+            sb.appendLine("blockDevice.blockSize: $bs bytes")
+            sb.appendLine("blockDevice.blocks: $blocks")
+            sb.appendLine("Total capacity: ${formatBytes(cap)}")
+
+            val partitionStartLba = (1L shl 20) / bs
+
+            // --- MBR ---
+            val mbr = readSector(0)
+            sb.appendLine()
+            sb.appendLine("--- MBR (device LBA 0) ---")
+            sb.appendLine("Bytes 0-3 (hex): ${hexRange(mbr, 0, 3)}")
+            sb.appendLine("Bytes 446-449 (hex): ${hexRange(mbr, 446, 449)}  (partition entry start)")
+            sb.appendLine("Partition type (byte 450): 0x${hex(mbr.get(450).toInt())}  (should be 0x0C)")
+            sb.appendLine("Partition start LBA (bytes 454-457): ${le32(mbr, 454)}  (should be 2048)")
+            sb.appendLine("Partition size sectors (bytes 458-461): ${le32(mbr, 458)}")
+            sb.appendLine("Bytes 510-511 (hex): ${hexRange(mbr, 510, 511)}  (should be 55 AA)")
+
+            // --- Boot sector ---
+            val boot = readSector(partitionStartLba)
+            val oem = ByteArray(8).also { boot.position(82); boot.get(it) }
+            sb.appendLine()
+            sb.appendLine("--- Boot sector (device LBA $partitionStartLba) ---")
+            sb.appendLine("Bytes 0-3 (hex): ${hexRange(boot, 0, 3)}  (should be EB 58 90 XX)")
+            sb.appendLine("Bytes per sector (11-12): ${le16(boot, 11)}  (should be 512)")
+            sb.appendLine("Sectors per cluster (13): ${boot.get(13).toInt() and 0xFF}")
+            sb.appendLine("Reserved sectors (14-15): ${le16(boot, 14)}  (should be 32)")
+            sb.appendLine("Number of FATs (16): ${boot.get(16).toInt() and 0xFF}  (should be 02)")
+            sb.appendLine("Root cluster (44-47): ${le32(boot, 44)}  (should be 2)")
+            sb.appendLine("Bytes 82-89 ASCII: '${String(oem, Charsets.US_ASCII)}'  (should be 'FAT32   ')")
+            sb.appendLine("Bytes 510-511 (hex): ${hexRange(boot, 510, 511)}  (should be 55 AA)")
+
+            // --- FAT1 sector 0 ---
+            val fatLba = partitionStartLba + 32
+            val fat = readSector(fatLba)
+            sb.appendLine()
+            sb.appendLine("--- FAT1 sector 0 (device LBA $fatLba) ---")
+            sb.appendLine("Entry 0 (0-3 hex): ${hexRange(fat, 0, 3)}  (should be F8 FF FF 0F)")
+            sb.appendLine("Entry 1 (4-7 hex): ${hexRange(fat, 4, 7)}  (should be FF FF FF 0F)")
+            sb.appendLine("Entry 2 (8-11 hex): ${hexRange(fat, 8, 11)}  (should be FF FF FF 0F)")
+
+            // --- Root directory ---
+            // dataStart = partitionStart + reserved(32) + 2 * fatSize.
+            val fatSize = le32(boot, 36)
+            val rootLba = partitionStartLba + 32 + 2 * fatSize
+            val rootDir = readSector(rootLba)
+            val label = ByteArray(11).also { rootDir.position(0); rootDir.get(it) }
+            sb.appendLine()
+            sb.appendLine("--- Root directory (device LBA $rootLba) ---")
+            sb.appendLine("First 32 bytes hex: ${hexRange(rootDir, 0, 31)}")
+            sb.appendLine("Bytes 0-10 ASCII: '${String(label, Charsets.US_ASCII)}'  (volume label)")
+            sb.appendLine("Byte 11 (attributes): 0x${hex(rootDir.get(11).toInt())}  (should be 0x08)")
+
+            sb.toString()
+        } catch (e: Exception) {
+            "Diagnostic failed: ${e.message}\n\n${sb}"
+        } finally {
+            runCatching { raw?.close() }
+        }
+    }
+
     /** Result of a standalone format operation. */
     sealed class FormatResult {
         data class Success(val capacityBytes: Long) : FormatResult()
@@ -202,10 +305,25 @@ class BurnEngine @Inject constructor(
             emitLog("Verifying written data...")
 
             raw = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
-            val partitionStartLba = (1L shl 20) / raw.blockSize
+            val rawDev = raw!!
+            val partitionStartLba = (1L shl 20) / rawDev.blockSize
+
+            // Safe direct boot-sector signature check before mounting.
+            run {
+                val bootBuf = ByteBuffer.allocate(rawDev.blockSize)
+                rawDev.blockDevice.read(partitionStartLba, bootBuf)
+                val sig = ((bootBuf.get(510).toInt() and 0xFF) == 0x55) &&
+                    ((bootBuf.get(511).toInt() and 0xFF) == 0xAA)
+                if (!sig) throw BurnException(
+                    "Could not read USB filesystem", "Try a different USB drive"
+                )
+            }
+
             val partitionDevice = me.jahnen.libaums.core.driver.ByteBlockDevice(
-                raw.blockDevice, partitionStartLba.toInt()
+                rawDev.blockDevice, partitionStartLba.toInt()
             )
+            // verify() must mount to read files back by path; this is read-only
+            // navigation (no UsbFile writes), so it cannot disturb the volume.
             val fs = Fat32FileSystem.read(partitionDevice)
                 ?: throw BurnException("Could not read USB filesystem", "Try a different USB drive")
             val root = fs.rootDirectory
@@ -218,7 +336,7 @@ class BurnEngine @Inject constructor(
                     !(it.name.lowercase() in SPLITTABLE && it.sizeBytes > FAT32_FILE_LIMIT)
             }
 
-            val rawDevice = raw
+            val rawDevice = rawDev
             val raf = RandomAccessFile(isoFile, "r")
             var mismatches = 0
             raf.use {
@@ -299,13 +417,14 @@ class BurnEngine @Inject constructor(
             // --- Step 2: raw block device ---
             emitLog("Opening USB device...")
             raw = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
-            val rawCapacity = raw.capacityBytes
+            val device = raw!!  // stable handle for closures/non-null reads below
+            val rawCapacity = device.capacityBytes
 
             // Trust whichever positive value we have; prefer the larger of the
             // raw read and the capacity hint from enumeration. This avoids a
             // false "ISO larger than USB capacity" when the raw read returns 0.
             val capacity = maxOf(rawCapacity, capacityHintBytes)
-            emitLog("Capacity: ${formatBytes(capacity)} · block ${raw.blockSize} B")
+            emitLog("Capacity: ${formatBytes(capacity)} · block ${device.blockSize} B")
 
             // Pre-flight size check: only enforce when we actually have a
             // trustworthy positive capacity. A zero/unknown capacity must never
@@ -333,7 +452,7 @@ class BurnEngine @Inject constructor(
 
             _state.value = BurnState.Formatting(0)
             emitLog("Formatting FAT32...")
-            val geometry = Fat32Formatter(raw.blockDevice).format(formatCapacity, label) { pct ->
+            val geometry = Fat32Formatter(device.blockDevice).format(formatCapacity, label) { pct ->
                 _state.value = BurnState.Formatting(pct)
             }
             emitLog("Format complete")
@@ -349,16 +468,23 @@ class BurnEngine @Inject constructor(
                 remainingSeconds = 0
             )
 
-            // --- Step 3b: mount check ---
-            // We still use libaums to VERIFY the format took (it reads the boot
-            // sector). We do NOT use UsbFile for writes — the FastUsbWriter owns
-            // all writes after this check.
-            val partitionStartLba = (1L shl 20) / raw.blockSize
-            val partitionDevice = me.jahnen.libaums.core.driver.ByteBlockDevice(
-                raw.blockDevice, partitionStartLba.toInt()
-            )
-            Fat32FileSystem.read(partitionDevice)
-                ?: throw BurnException("Format verification failed", "USB drive may be write-protected or damaged")
+            // --- Step 3b: format verification (direct boot-sector read) ---
+            // We deliberately do NOT use libaums Fat32FileSystem.read() here: it
+            // can write dirty-mount flags back through the partition reference,
+            // which could disturb reserved sectors. A direct read of the boot
+            // signature is a safe, side-effect-free verification.
+            val partitionStartLba = geometry.partitionStartLba
+            run {
+                val bootBuf = ByteBuffer.allocate(device.blockSize)
+                device.blockDevice.read(partitionStartLba, bootBuf)
+                val sig = ((bootBuf.get(510).toInt() and 0xFF) == 0x55) &&
+                    ((bootBuf.get(511).toInt() and 0xFF) == 0xAA)
+                if (!sig) throw BurnException(
+                    "Format verification failed",
+                    "USB drive may be write-protected or damaged"
+                )
+                emitLog("Format verified OK")
+            }
 
             // --- Step 4: parse ISO ---
             emitLog("Parsing ISO filesystem...")
@@ -375,7 +501,7 @@ class BurnEngine @Inject constructor(
             // proven) libaums UsbFile path so a FastUsbWriter bug degrades to
             // "slow" rather than "broken".
             try {
-                copyEntriesFast(isoFile, entries, raw.blockDevice, geometry, label, optimalChunk, startMs)
+                copyEntriesFast(isoFile, entries, device.blockDevice, geometry, label, optimalChunk, startMs)
             } catch (ce: kotlinx.coroutines.CancellationException) {
                 throw ce
             } catch (fastError: Exception) {
@@ -383,13 +509,38 @@ class BurnEngine @Inject constructor(
                 // Re-format to clear any partial structures, then remount and copy
                 // via libaums.
                 _state.value = BurnState.Formatting(0)
-                Fat32Formatter(raw.blockDevice).format(formatCapacity, label) { pct ->
+                Fat32Formatter(device.blockDevice).format(formatCapacity, label) { pct ->
                     _state.value = BurnState.Formatting(pct)
                 }
                 val fallbackFs = Fat32FileSystem.read(
-                    me.jahnen.libaums.core.driver.ByteBlockDevice(raw.blockDevice, partitionStartLba.toInt())
+                    me.jahnen.libaums.core.driver.ByteBlockDevice(device.blockDevice, partitionStartLba.toInt())
                 ) ?: throw BurnException("USB filesystem unreadable", "Try a different USB drive")
                 copyEntriesLibaums(isoFile, entries, fallbackFs.rootDirectory, startMs)
+            }
+
+            // --- Boot-sector verify + rewrite ---
+            // Read back the boot sector after all writes. If its signature was
+            // somehow clobbered, rewrite just the boot sector and its backup
+            // (nothing else) so the volume mounts. This directly targets the
+            // "can't read superblock" failure mode.
+            run {
+                val bootVerify = ByteBuffer.allocate(device.blockSize)
+                device.blockDevice.read(geometry.partitionStartLba, bootVerify)
+                val b510 = bootVerify.get(510).toInt() and 0xFF
+                val b511 = bootVerify.get(511).toInt() and 0xFF
+                val oemBytes = ByteArray(8).also { arr ->
+                    bootVerify.position(82)
+                    bootVerify.get(arr)
+                }
+                val oem = String(oemBytes, Charsets.US_ASCII)
+                emitLog("Boot sector verify: sig=${b510.toString(16)}${b511.toString(16)} fs='$oem'")
+                if (b510 != 0x55 || b511 != 0xAA) {
+                    emitLog("⚠ Boot sector corrupted! Rewriting...", isWarning = true)
+                    val boot = Fat32Formatter(device.blockDevice).buildPublicBootSector(geometry, label)
+                    device.blockDevice.write(geometry.partitionStartLba, ByteBuffer.wrap(boot))
+                    device.blockDevice.write(geometry.partitionStartLba + 6, ByteBuffer.wrap(boot))
+                    emitLog("Boot sector rewritten.")
+                }
             }
 
             // --- Step 8: finalize ---

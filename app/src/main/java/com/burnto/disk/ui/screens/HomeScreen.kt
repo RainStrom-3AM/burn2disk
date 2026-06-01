@@ -12,14 +12,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -28,6 +33,7 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,6 +43,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -46,9 +54,12 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.burnto.disk.ui.components.CircularBurnProgress
 import com.burnto.disk.ui.components.SandstormUsb
 import com.burnto.disk.ui.theme.Amber
+import com.burnto.disk.ui.theme.MonoText
 import com.burnto.disk.ui.theme.NearBlack
+import com.burnto.disk.ui.theme.SurfaceDark
 import com.burnto.disk.ui.theme.SuccessGreen
 import com.burnto.disk.ui.theme.TextSecondary
+import com.burnto.disk.viewmodel.DiagnoseUiState
 import com.burnto.disk.viewmodel.FormatUiState
 import com.burnto.disk.viewmodel.HomeViewModel
 
@@ -61,10 +72,12 @@ fun HomeScreen(
     onSelectIso: () -> Unit,
     onDownloadIso: () -> Unit,
     onFormatDisk: () -> Unit,
+    onDiagnoseUsb: () -> Unit,
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val usbConnected by viewModel.usbConnected.collectAsStateWithLifecycle()
     val formatState by viewModel.formatState.collectAsStateWithLifecycle()
+    val diagnoseState by viewModel.diagnoseState.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -170,6 +183,23 @@ fun HomeScreen(
                 Text("FORMAT DISK", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             }
 
+            Spacer(Modifier.height(12.dp))
+
+            // Diagnostic tool — reads the USB and shows a sector-level report.
+            OutlinedButton(
+                onClick = onDiagnoseUsb,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                border = BorderStroke(1.dp, TextSecondary)
+            ) {
+                Icon(Icons.Outlined.BugReport, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.size(8.dp))
+                Text("DIAGNOSE USB", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            }
+
             Spacer(Modifier.weight(1f))
 
             Row(
@@ -208,6 +238,60 @@ fun HomeScreen(
     if (fmt is FormatUiState.Formatting) {
         FormattingOverlay(progress = fmt.progress)
     }
+
+    // USB diagnostic report dialog.
+    when (val d = diagnoseState) {
+        is DiagnoseUiState.Running -> {
+            AlertDialog(
+                onDismissRequest = { },
+                containerColor = SurfaceDark,
+                title = { Text("Reading USB...", color = Color.White) },
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(color = Amber, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.size(12.dp))
+                        Text("Reading sectors...", color = TextSecondary)
+                    }
+                },
+                confirmButton = {}
+            )
+        }
+        is DiagnoseUiState.Report -> {
+            DiagnosticDialog(
+                report = d.text,
+                onDismiss = { viewModel.dismissDiagnose() }
+            )
+        }
+        else -> Unit
+    }
+}
+
+@Composable
+private fun DiagnosticDialog(report: String, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        title = { Text("USB Diagnostic", color = Color.White, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(report, style = MonoText.small, color = TextSecondary)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { clipboard.setText(AnnotatedString(report)) }) {
+                Text("COPY", color = Amber, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("CLOSE", color = TextSecondary) }
+        }
+    )
 }
 
 @Composable

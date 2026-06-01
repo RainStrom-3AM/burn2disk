@@ -46,6 +46,13 @@ sealed class FormatUiState {
     data class Error(val message: String) : FormatUiState()
 }
 
+/** UI state for the USB diagnostic report dialog. */
+sealed class DiagnoseUiState {
+    data object Idle : DiagnoseUiState()
+    data object Running : DiagnoseUiState()
+    data class Report(val text: String) : DiagnoseUiState()
+}
+
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
@@ -75,6 +82,9 @@ class HomeViewModel @Inject constructor(
 
     private val _formatState = MutableStateFlow<FormatUiState>(FormatUiState.Idle)
     val formatState: StateFlow<FormatUiState> = _formatState.asStateFlow()
+
+    private val _diagnoseState = MutableStateFlow<DiagnoseUiState>(DiagnoseUiState.Idle)
+    val diagnoseState: StateFlow<DiagnoseUiState> = _diagnoseState.asStateFlow()
 
     private var downloadJob: Job? = null
 
@@ -240,5 +250,23 @@ class HomeViewModel @Inject constructor(
 
     fun resetFormatState() {
         _formatState.value = FormatUiState.Idle
+    }
+
+    /** Runs the read-only USB diagnostic and publishes the report. */
+    fun diagnoseUsb() {
+        viewModelScope.launch {
+            val devices = runCatching { usbDeviceManager.rawDevices() }.getOrDefault(emptyList())
+            if (devices.isEmpty()) {
+                _diagnoseState.value = DiagnoseUiState.Report("No USB device found. Connect a drive via OTG first.")
+                return@launch
+            }
+            _diagnoseState.value = DiagnoseUiState.Running
+            val report = burnEngine.diagnose(devices.first().usbDevice.deviceId)
+            _diagnoseState.value = DiagnoseUiState.Report(report)
+        }
+    }
+
+    fun dismissDiagnose() {
+        _diagnoseState.value = DiagnoseUiState.Idle
     }
 }

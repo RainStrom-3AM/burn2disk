@@ -309,10 +309,18 @@ class FastUsbWriter(
         val startLba = geo.clusterToLba(firstCluster)
 
         return kotlinx.coroutines.coroutineScope {
-            // Channel carries (buffer, validLen). Capacity 2 = at most 2 chunks in
-            // flight so memory stays bounded (3 buffers total incl. the one being
-            // written). Buffers are heap-backed (libaums needs .array()).
-            val channel = Channel<Pair<ByteBuffer, Int>>(capacity = 2)
+            // Channel carries (buffer, validLen). Capacity 2 = at most 2 chunks
+            // queued. Buffers are heap-backed (libaums needs .array()).
+            val channelCapacity = 2
+            val channel = Channel<Pair<ByteBuffer, Int>>(capacity = channelCapacity)
+
+            // Reused buffer pool. Max buffers live at once = queued (capacity) +
+            // one being written by the consumer + one being filled by the
+            // producer = capacity + 2. A smaller pool would let the producer
+            // overwrite a buffer the consumer is still writing → data corruption.
+            val poolSize = channelCapacity + 2
+            val bufPool = Array(poolSize) { ByteBuffer.allocate(optimalChunkBytes + bytesPerSector) }
+            var poolIdx = 0
 
             val producer = launch(Dispatchers.IO) {
                 raf.seek(extentLba * isoSector)
@@ -324,8 +332,12 @@ class FastUsbWriter(
                         val toRead = minOf(optimalChunkBytes.toLong(), remaining).toInt()
                         raf.readFully(tmp, 0, toRead)
                         val padded = ((toRead + bytesPerSector - 1) / bytesPerSector) * bytesPerSector
-                        val buf = ByteBuffer.allocate(padded)
+                        val buf = bufPool[poolIdx % poolSize]
+                        poolIdx++
+                        buf.clear()
                         buf.put(tmp, 0, toRead)
+                        // Zero the tail (buffer is reused, so re-zero the pad region).
+                        for (i in toRead until padded) buf.put(i, 0)
                         buf.position(0)
                         buf.limit(padded)
                         channel.send(buf to toRead)
@@ -505,6 +517,8 @@ class FastUsbWriter(
         b.putInt(484, 0x61417272)             // "rrAa"
         b.putInt(488, freeClusters.toInt())
         b.putInt(492, nextFreeCluster.toInt())
+        b.put(508, 0x00)
+        b.put(509, 0x00)
         b.put(510, 0x55.toByte())
         b.put(511, 0xAA.toByte())
         b.clear()
