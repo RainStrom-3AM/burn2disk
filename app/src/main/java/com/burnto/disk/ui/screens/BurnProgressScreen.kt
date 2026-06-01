@@ -67,25 +67,44 @@ fun BurnProgressScreen(
     // Start the burn once when entering the screen.
     LaunchedEffect(Unit) { viewModel.startBurn() }
 
-    // Navigate to the result screen on terminal states.
+    // Navigate to the result screen on terminal states. On success, briefly hold
+    // so the ring can turn green and show the checkmark before navigating.
     LaunchedEffect(state) {
-        if (state is BurnState.Success || state is BurnState.Failed) {
-            onComplete()
+        when (state) {
+            is BurnState.Success -> {
+                kotlinx.coroutines.delay(1000)
+                onComplete()
+            }
+            is BurnState.Failed -> onComplete()
+            else -> Unit
         }
     }
 
-    val (percent, label, isIndeterminate) = when (val s = state) {
-        is BurnState.Idle -> Triple(0, "Preparing...", true)
+    // Determine whether we are in the brief "parsing" sub-phase (a Copying state
+    // emitted before any bytes are written) versus actively writing files.
+    val isParsing = (state as? BurnState.Copying)?.let {
+        it.currentFile == "Parsing ISO..." || it.totalBytes == 0L || it.bytesWritten == 0L
+    } ?: false
+
+    val (percent, label, showStats) = when (val s = state) {
+        is BurnState.Idle -> Triple(0, "Preparing...", false)
         is BurnState.Formatting -> Triple(s.progress, "Formatting FAT32...", false)
-        is BurnState.Copying -> Triple(
-            s.percent,
-            "Writing files... ${Format.bytes(s.bytesWritten)} of ${Format.bytes(s.totalBytes)}",
-            false
-        )
+        is BurnState.Copying ->
+            if (isParsing) {
+                Triple(0, "Parsing ISO filesystem...", false)
+            } else {
+                Triple(
+                    s.percent,
+                    "Writing files... ${Format.bytes(s.bytesWritten)} of ${Format.bytes(s.totalBytes)}",
+                    true
+                )
+            }
         is BurnState.Verifying -> Triple(s.progress, "Verifying...", false)
         is BurnState.Success -> Triple(100, "Complete", false)
         is BurnState.Failed -> Triple(0, "Failed", false)
     }
+    // Indeterminate only during the very first preparing / parsing moments.
+    val isIndeterminate = state is BurnState.Idle || isParsing
 
     Scaffold(containerColor = NearBlack) { padding ->
         Column(
@@ -135,11 +154,11 @@ fun BurnProgressScreen(
 
             Spacer(Modifier.height(12.dp))
 
-            // Stats row.
-            if (state is BurnState.Copying) {
+            // Speed / ETA row — only while actively writing files.
+            if (showStats && state is BurnState.Copying) {
                 val s = state as BurnState.Copying
                 Text(
-                    text = "${Format.speedMBps(s.speedMBps)} · ${Format.eta(s.remainingSeconds)}",
+                    text = "${Format.speedMBps(s.speedMBps)}  ·  ${Format.etaShort(s.remainingSeconds)}",
                     style = MonoText.medium,
                     color = TextSecondary
                 )

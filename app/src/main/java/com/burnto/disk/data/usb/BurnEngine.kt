@@ -60,7 +60,7 @@ class BurnEngine @Inject constructor(
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     companion object {
-        private const val COPY_BUFFER = 64 * 1024
+        private const val COPY_BUFFER = 512 * 1024
         private const val ISO_SECTOR = IsoParser.SECTOR_SIZE
         private const val FAT32_FILE_LIMIT = 0xFFFFFFFFL
         private const val PROGRESS_INTERVAL_MS = 500L
@@ -221,6 +221,17 @@ class BurnEngine @Inject constructor(
                 _state.value = BurnState.Formatting(pct)
             }
             emitLog("Format complete")
+
+            // Immediately leave the Formatting state so the UI does not appear
+            // stuck at "Formatting FAT32... 100%". Show a parsing phase while the
+            // ISO is walked (which can take a moment for large images).
+            _state.value = BurnState.Copying(
+                currentFile = "Parsing ISO...",
+                bytesWritten = 0L,
+                totalBytes = isoFile.length(),
+                speedMBps = 0f,
+                remainingSeconds = 0
+            )
 
             // --- Step 3b: mount fresh filesystem ---
             // The new FAT32 partition starts 1 MiB in; wrap the raw device with that offset.

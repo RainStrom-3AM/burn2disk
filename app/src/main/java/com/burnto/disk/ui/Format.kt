@@ -42,6 +42,16 @@ object Format {
         }
     }
 
+    /** Burn-progress ETA: "{n} sec/min/hr left". */
+    fun etaShort(seconds: Int): String {
+        if (seconds <= 0) return "almost done"
+        return when {
+            seconds < 60 -> "$seconds sec left"
+            seconds < 3600 -> "${seconds / 60} min left"
+            else -> "${seconds / 3600} hr left"
+        }
+    }
+
     fun date(epochMs: Long): String =
         SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(epochMs))
 }

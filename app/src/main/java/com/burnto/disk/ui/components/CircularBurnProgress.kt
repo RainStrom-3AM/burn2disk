@@ -40,7 +40,9 @@ fun CircularBurnProgress(
         animationSpec = tween(durationMillis = 400),
         label = "sweep"
     )
-    val ringColor = if (isSuccess || percent >= 100) SuccessGreen else Amber
+    // The ring only turns green on actual success — not merely when a phase
+    // (formatting / writing) momentarily reaches 100%.
+    val ringColor = if (isSuccess) SuccessGreen else Amber
 
     Box(modifier = modifier.size(240.dp), contentAlignment = Alignment.Center) {
         Canvas(modifier = Modifier.size(240.dp)) {

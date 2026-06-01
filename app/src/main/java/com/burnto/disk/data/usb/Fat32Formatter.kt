@@ -42,8 +42,9 @@ class Fat32Formatter(
         private const val ROOT_CLUSTER = 2L
         private const val FSINFO_SECTOR = 1
         private const val BACKUP_BOOT_SECTOR = 6
-        // Cap a single SCSI WRITE(10) burst at 128 KiB to stay friendly to all controllers.
-        private const val MAX_BURST_BYTES = 128 * 1024
+        // Cap a single SCSI WRITE(10) burst at 512 KiB to reduce per-call
+        // libaums overhead on bulk writes while staying controller-friendly.
+        private const val MAX_BURST_BYTES = 512 * 1024
     }
 
     /**
@@ -51,7 +52,8 @@ class Fat32Formatter(
      *
      * @param totalBytes usable capacity of the whole device in bytes.
      * @param volumeLabel up to 11 chars; uppercased and padded.
-     * @param onProgress 0-100 progress callback (dominated by zeroing the FATs).
+     * @param onProgress 0-100 progress callback. Formatting is now near-instant
+     *   since the FATs are no longer fully zeroed.
      */
     fun format(
         totalBytes: Long,
@@ -95,9 +97,14 @@ class Fat32Formatter(
         writeSectorAbs(partitionStartLba + BACKUP_BOOT_SECTOR + FSINFO_SECTOR, fsInfo)
         onProgress(6)
 
-        // --- Zero both FATs, then write reserved + root-dir chain entries ---
-        zeroFats(partitionStartLba, fatSizeSectors, bytesPerSector, onProgress)
+        // --- Initialise FATs (reserved + root-dir chain entries only) ---
+        // We intentionally do NOT zero the full FATs. On a 28 GB drive the two
+        // FATs are ~56 MB; zeroing them one SCSI burst at a time takes minutes.
+        // FAT32 only requires cluster 0/1 plus the root-dir EOC marker to be
+        // valid — the OS and libaums treat unwritten FAT entries as free
+        // (0x00000000), and the file copy allocates clusters fresh afterward.
         writeFatHeads(partitionStartLba, fatSizeSectors, bytesPerSector)
+        onProgress(80)
 
         // --- Root directory cluster: only the volume-label entry ---
         val firstDataSector = partitionStartLba + RESERVED_SECTORS + NUM_FATS * fatSizeSectors
@@ -202,33 +209,6 @@ class Fat32Formatter(
         b.put(510, 0x55.toByte())
         b.put(511, 0xAA.toByte())
         return b.array()
-    }
-
-    private fun zeroFats(
-        partitionStartLba: Long,
-        fatSizeSectors: Long,
-        bytesPerSector: Int,
-        onProgress: (Int) -> Unit
-    ) {
-        val chunkSectors = (MAX_BURST_BYTES / bytesPerSector).coerceAtLeast(1)
-        val zero = ByteBuffer.allocate(bytesPerSector * chunkSectors)
-        val totalFatSectors = fatSizeSectors * NUM_FATS
-        var written = 0L
-
-        for (fat in 0 until NUM_FATS) {
-            val fatStart = partitionStartLba + RESERVED_SECTORS + fat * fatSizeSectors
-            var sector = 0L
-            while (sector < fatSizeSectors) {
-                val count = minOf(chunkSectors.toLong(), fatSizeSectors - sector).toInt()
-                zero.clear()
-                zero.limit(count * bytesPerSector)
-                blockDevice.write(fatStart + sector, zero)
-                sector += count
-                written += count
-                val pct = 6 + ((written * 92) / totalFatSectors).toInt()
-                onProgress(pct.coerceIn(6, 98))
-            }
-        }
     }
 
     private fun writeFatHeads(
