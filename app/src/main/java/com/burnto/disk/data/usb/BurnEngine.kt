@@ -258,7 +258,9 @@ class BurnEngine @Inject constructor(
                 }
             }
 
-            // Confirm readable; rewrite partition table if geometry was lost.
+            // Re-init only to refresh the readable capacity. A zero/stale value
+            // here is a normal post-write controller timing quirk — never
+            // re-format on it (that would wipe the filesystem we just wrote).
             val device = raw!!
             withContext(Dispatchers.IO) { runCatching { device.close() } }
             raw = null
@@ -266,10 +268,8 @@ class BurnEngine @Inject constructor(
                 runCatching {
                     val recheck = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
                     raw = recheck
-                    if (recheck.blockDevice.blocks <= 0L) {
-                        Fat32Formatter(recheck.blockDevice).format(capacity, volumeLabel)
-                    }
-                    recheck.capacityBytes
+                    val blocks = recheck.blockDevice.blocks
+                    if (blocks <= 0L) capacity else recheck.capacityBytes
                 }.getOrDefault(capacity)
             }
             _formatProgress.value = 100
@@ -545,10 +545,11 @@ class BurnEngine @Inject constructor(
 
             // --- Step 8: finalize ---
             // Close the device, then re-open and re-init to confirm the drive is
-            // still readable. Some controllers report zero capacity on the first
-            // re-init right after a heavy write burst, which would corrupt the
-            // next burn's geometry. If that happens we rewrite the MBR + boot
-            // sector (partition table) so the USB is always left in a valid state.
+            // still readable. NOTE: many USB controllers return a stale/zero
+            // capacity from SCSI READ CAPACITY for a few seconds after a heavy
+            // write burst — this is a timing quirk, NOT data loss. We must NEVER
+            // re-format here: the file data and metadata are already written and
+            // the boot sector was verified above.
             emitLog("Flushing and unmounting...")
             val deviceToClose = raw
             raw = null
@@ -565,9 +566,9 @@ class BurnEngine @Inject constructor(
                         val blocks = recheck.blockDevice.blocks
                         emitLog("Post-burn capacity: ${formatBytes(recheck.capacityBytes)} ($blocks blocks)")
                         if (blocks <= 0L) {
-                            // Controller lost geometry: rewrite the partition table.
-                            emitLog("Capacity reads zero — rewriting partition table...")
-                            Fat32Formatter(recheck.blockDevice).format(formatCapacity, label)
+                            // Transient zero capacity after a write burst — informational only.
+                            emitLog("Note: USB reports zero capacity on re-init (normal for some controllers)")
+                            emitLog("Files are written and intact — this does not affect the burn result")
                         }
                         true
                     }.getOrElse { e ->

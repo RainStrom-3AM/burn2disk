@@ -14,3 +14,6 @@ local.properties
 # Ship the released APK from the release/ folder.
 !release/
 !release/*.apk
+
+# Local archives / scratch
+*.zip

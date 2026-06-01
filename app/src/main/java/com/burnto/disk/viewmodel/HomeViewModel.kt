@@ -228,8 +228,10 @@ class HomeViewModel @Inject constructor(
                     volumeLabel = "USB DISK"
                 ) { pct -> _formatState.value = FormatUiState.Formatting(pct) }
 
-                // 6. Re-init after format to confirm the drive is readable and to
-                //    refresh capacity for the device list.
+                // 6. Re-init after format to refresh capacity for the device
+                //    list. NOTE: a zero/stale capacity here is a normal post-write
+                //    controller timing quirk — we only log it, never re-format
+                //    (re-formatting would needlessly wipe the fresh filesystem).
                 raw.close()
                 raw = null
                 runCatching {
