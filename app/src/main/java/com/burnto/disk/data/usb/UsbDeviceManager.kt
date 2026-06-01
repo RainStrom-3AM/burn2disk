@@ -57,16 +57,21 @@ class UsbDeviceManager @Inject constructor(
 
             // If the filesystem couldn't report a capacity (unformatted, or an
             // unsupported fs such as exFAT/NTFS), fall back to the raw SCSI
-            // READ CAPACITY so we still have a trustworthy device size. This is
-            // the value the burn pre-flight uses as its capacity hint.
+            // READ CAPACITY so we still have a trustworthy device size. Right
+            // after a burn the first re-init can transiently report 0 blocks, so
+            // retry a couple of times before giving up.
             if (capacityBytes <= 0L && hasPerm) {
-                capacityBytes = runCatching {
-                    val raw = RawUsbBlockDevice.create(usbManager, dev)
-                    raw.init()
-                    val bytes = raw.capacityBytes
-                    raw.close()
-                    bytes
-                }.getOrDefault(0L)
+                repeat(3) { attempt ->
+                    if (capacityBytes > 0L) return@repeat
+                    capacityBytes = runCatching {
+                        val raw = RawUsbBlockDevice.create(usbManager, dev)
+                        raw.init()
+                        val bytes = raw.capacityBytes
+                        raw.close()
+                        bytes
+                    }.getOrDefault(0L)
+                    if (capacityBytes <= 0L && attempt < 2) Thread.sleep(200)
+                }
             }
 
             UsbDeviceInfo(

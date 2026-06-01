@@ -11,13 +11,16 @@ import com.burnto.disk.data.model.DownloadState
 import com.burnto.disk.data.model.IsoInfo
 import com.burnto.disk.data.model.RecentIso
 import com.burnto.disk.data.model.UsbDeviceInfo
+import com.burnto.disk.data.usb.BurnEngine
 import com.burnto.disk.data.usb.UsbDeviceManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -30,12 +33,21 @@ sealed class IsoUiState {
     data class Error(val message: String) : IsoUiState()
 }
 
+/** UI state for the standalone Format Disk flow. */
+sealed class FormatUiState {
+    data object Idle : FormatUiState()
+    data class InProgress(val progress: Int) : FormatUiState()
+    data class Done(val message: String) : FormatUiState()
+    data class Error(val message: String) : FormatUiState()
+}
+
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val isoRepository: IsoRepository,
     private val downloadManager: DownloadManager,
     private val recentIsoStore: RecentIsoStore,
     private val usbDeviceManager: UsbDeviceManager,
+    private val burnEngine: BurnEngine,
     private val session: BurnSession
 ) : ViewModel() {
 
@@ -51,6 +63,13 @@ class HomeViewModel @Inject constructor(
     private val _recent = MutableStateFlow<List<RecentIso>>(emptyList())
     val recent: StateFlow<List<RecentIso>> = _recent.asStateFlow()
 
+    // The first connected USB device, refreshed on demand (for Format Disk).
+    private val _connectedDevice = MutableStateFlow<UsbDeviceInfo?>(null)
+    val connectedDevice: StateFlow<UsbDeviceInfo?> = _connectedDevice.asStateFlow()
+
+    private val _formatState = MutableStateFlow<FormatUiState>(FormatUiState.Idle)
+    val formatState: StateFlow<FormatUiState> = _formatState.asStateFlow()
+
     private var downloadJob: Job? = null
 
     init {
@@ -59,7 +78,13 @@ class HomeViewModel @Inject constructor(
     }
 
     fun refreshUsb() {
-        _usbConnected.value = usbDeviceManager.hasAnyDevice()
+        viewModelScope.launch {
+            val devices = withContext(Dispatchers.IO) {
+                runCatching { usbDeviceManager.listDevices() }.getOrDefault(emptyList())
+            }
+            _usbConnected.value = devices.isNotEmpty()
+            _connectedDevice.value = devices.firstOrNull()
+        }
     }
 
     fun loadRecent() {
@@ -132,5 +157,37 @@ class HomeViewModel @Inject constructor(
 
     fun resetIsoState() {
         _isoState.value = IsoUiState.Idle
+    }
+
+    /**
+     * Standalone format of the connected USB drive (Home-screen "Format Disk").
+     * Lets the user recover a broken drive after a failed burn without a PC.
+     */
+    fun formatDisk(volumeLabel: String) {
+        val device = _connectedDevice.value ?: run {
+            _formatState.value = FormatUiState.Error("Connect a USB drive via OTG first")
+            return
+        }
+        viewModelScope.launch {
+            _formatState.value = FormatUiState.InProgress(0)
+            val result = burnEngine.formatDevice(
+                deviceId = device.deviceId,
+                volumeLabel = volumeLabel.ifBlank { "USB DISK" },
+                capacityHintBytes = device.capacityBytes
+            ) { pct -> _formatState.value = FormatUiState.InProgress(pct) }
+
+            _formatState.value = when (result) {
+                is BurnEngine.FormatResult.Success ->
+                    FormatUiState.Done("Format complete — drive is ready")
+                is BurnEngine.FormatResult.Failure ->
+                    FormatUiState.Error(result.message)
+            }
+            // Refresh capacity so the UI reflects the freshly formatted drive.
+            refreshUsb()
+        }
+    }
+
+    fun resetFormatState() {
+        _formatState.value = FormatUiState.Idle
     }
 }

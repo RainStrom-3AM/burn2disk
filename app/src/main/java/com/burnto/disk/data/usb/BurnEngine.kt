@@ -58,6 +58,10 @@ class BurnEngine @Inject constructor(
     private val _log = MutableSharedFlow<BurnLogLine>(replay = 200, extraBufferCapacity = 256)
     val log: SharedFlow<BurnLogLine> = _log.asSharedFlow()
 
+    /** Progress of a standalone format operation (0-100), or null when idle. */
+    private val _formatProgress = MutableStateFlow<Int?>(null)
+    val formatProgress: StateFlow<Int?> = _formatProgress.asStateFlow()
+
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     companion object {
@@ -134,6 +138,75 @@ class BurnEngine @Inject constructor(
 
     fun resetState() {
         _state.value = BurnState.Idle
+    }
+
+    /** Result of a standalone format operation. */
+    sealed class FormatResult {
+        data class Success(val capacityBytes: Long) : FormatResult()
+        data class Failure(val message: String) : FormatResult()
+    }
+
+    /**
+     * Standalone FAT32 format (used by the Home-screen "Format Disk" feature to
+     * recover a broken USB without a PC). Reuses the exact [Fat32Formatter] code
+     * the burn uses, then re-inits to confirm the drive is readable.
+     *
+     * @param onProgress 0-100 progress callback.
+     */
+    suspend fun formatDevice(
+        deviceId: Int,
+        volumeLabel: String,
+        capacityHintBytes: Long = 0L,
+        onProgress: (Int) -> Unit = {}
+    ): FormatResult {
+        var raw: RawUsbBlockDevice? = null
+        return try {
+            val msd = usbDeviceManager.findRawDeviceById(deviceId)
+                ?: return FormatResult.Failure("USB device not found. Reconnect and try again.")
+            val usbDevice = msd.usbDevice
+            if (!usbDeviceManager.requestPermission(usbDevice)) {
+                return FormatResult.Failure("USB permission denied.")
+            }
+
+            _formatProgress.value = 0
+            onProgress(0)
+            raw = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
+            val rawCapacity = raw.capacityBytes
+            val capacity = maxOf(rawCapacity, capacityHintBytes)
+            if (capacity <= 0L) {
+                return FormatResult.Failure("Could not read USB capacity. Reconnect the drive.")
+            }
+
+            withContext(Dispatchers.IO) {
+                Fat32Formatter(raw!!.blockDevice).format(capacity, volumeLabel) { pct ->
+                    _formatProgress.value = pct
+                    onProgress(pct)
+                }
+            }
+
+            // Confirm readable; rewrite partition table if geometry was lost.
+            val device = raw!!
+            withContext(Dispatchers.IO) { runCatching { device.close() } }
+            raw = null
+            val confirmed = withContext(Dispatchers.IO) {
+                runCatching {
+                    val recheck = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
+                    raw = recheck
+                    if (recheck.blockDevice.blocks <= 0L) {
+                        Fat32Formatter(recheck.blockDevice).format(capacity, volumeLabel)
+                    }
+                    recheck.capacityBytes
+                }.getOrDefault(capacity)
+            }
+            _formatProgress.value = 100
+            onProgress(100)
+            FormatResult.Success(confirmed)
+        } catch (e: Exception) {
+            FormatResult.Failure(e.message ?: "Format failed")
+        } finally {
+            withContext(Dispatchers.IO) { runCatching { raw?.close() } }
+            _formatProgress.value = null
+        }
     }
 
     /**
@@ -344,19 +417,48 @@ class BurnEngine @Inject constructor(
             }
 
             // --- Step 8: finalize ---
-            // Data and metadata are already written. Emit Success FIRST so the UI
-            // can navigate immediately, then close the device best-effort.
-            val duration = ((System.currentTimeMillis() - startMs) / 1000).toInt()
-            _state.value = BurnState.Success(isoSize, duration)
-            emitLog("Burn complete in ${duration}s")
-
+            // Close the device, then re-open and re-init to confirm the drive is
+            // still readable. Some controllers report zero capacity on the first
+            // re-init right after a heavy write burst, which would corrupt the
+            // next burn's geometry. If that happens we rewrite the MBR + boot
+            // sector (partition table) so the USB is always left in a valid state.
             emitLog("Flushing and unmounting...")
             val deviceToClose = raw
             raw = null
-            // Bound the unmount so a stalled controller can't hang the coroutine.
             withTimeoutOrNull(5000) {
                 withContext(Dispatchers.IO) { runCatching { deviceToClose?.close() } }
             }
+
+            emitLog("Re-checking USB after write...")
+            val reinitOk = withTimeoutOrNull(8000) {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val recheck = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
+                        raw = recheck
+                        val blocks = recheck.blockDevice.blocks
+                        emitLog("Post-burn capacity: ${formatBytes(recheck.capacityBytes)} ($blocks blocks)")
+                        if (blocks <= 0L) {
+                            // Controller lost geometry: rewrite the partition table.
+                            emitLog("Capacity reads zero — rewriting partition table...")
+                            Fat32Formatter(recheck.blockDevice).format(formatCapacity, label)
+                        }
+                        true
+                    }.getOrElse { e ->
+                        emitLog("Re-check skipped: ${e.message}")
+                        false
+                    }
+                }
+            } ?: false
+            if (!reinitOk) emitLog("Re-check timed out; drive should still be valid")
+            // Close the recheck handle.
+            withTimeoutOrNull(5000) {
+                withContext(Dispatchers.IO) { runCatching { raw?.close() } }
+            }
+            raw = null
+
+            val duration = ((System.currentTimeMillis() - startMs) / 1000).toInt()
+            _state.value = BurnState.Success(isoSize, duration)
+            emitLog("Burn complete in ${duration}s")
         } catch (e: BurnException) {
             emitLog("ERROR: ${e.message}")
             _state.value = BurnState.Failed(e.message ?: "Burn failed", e.suggestion)

@@ -32,6 +32,7 @@ import com.burnto.disk.ui.theme.MonoText
 import com.burnto.disk.ui.theme.SurfaceDark
 import com.burnto.disk.ui.theme.SurfaceVariantDark
 import com.burnto.disk.ui.theme.TextSecondary
+import com.burnto.disk.ui.theme.WarningYellow
 
 /** A selectable card representing one connected USB OTG device. */
 @Composable
@@ -71,11 +72,30 @@ fun UsbDeviceCard(
                         fontWeight = FontWeight.SemiBold,
                         color = Color.White
                     )
-                    Text(
-                        text = "${Format.bytes(device.capacityBytes)} · ${device.filesystem}",
-                        style = MonoText.small,
-                        color = TextSecondary
-                    )
+                    if (device.capacityBytes > 0L) {
+                        Text(
+                            text = "${Format.bytes(device.capacityBytes)} · ${device.filesystem}",
+                            style = MonoText.small,
+                            color = TextSecondary
+                        )
+                    } else {
+                        // Capacity could not be read (e.g. transient zero right
+                        // after a burn). Surface it honestly rather than "0 B".
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Filled.Warning,
+                                contentDescription = null,
+                                tint = WarningYellow,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.size(4.dp))
+                            Text(
+                                text = "Unknown size — tap Refresh or Format",
+                                style = MonoText.small,
+                                color = WarningYellow
+                            )
+                        }
+                    }
                     Text(
                         text = String.format("VID:%04X PID:%04X", device.vendorId, device.productId),
                         style = MonoText.small,
