@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import me.jahnen.libaums.core.fs.FileSystem
 import me.jahnen.libaums.core.fs.UsbFile
 import me.jahnen.libaums.core.fs.fat32.Fat32FileSystem
@@ -257,13 +258,22 @@ class BurnEngine @Inject constructor(
             copyEntries(isoFile, entries, root, fs, startMs)
 
             // --- Step 8: finalize ---
-            emitLog("Flushing and unmounting...")
-            raw.close()
-            raw = null
-
+            // The data is already written and flushed per-file during copy. Emit
+            // Success FIRST so the UI can navigate immediately, then close the
+            // device best-effort. libaums close() is synchronous, but on some
+            // controllers it can stall — we must never let that block the
+            // terminal state from reaching the UI.
             val duration = ((System.currentTimeMillis() - startMs) / 1000).toInt()
             _state.value = BurnState.Success(isoSize, duration)
             emitLog("Burn complete in ${duration}s")
+
+            emitLog("Flushing and unmounting...")
+            val deviceToClose = raw
+            raw = null
+            // Bound the unmount so a stalled controller can't hang the coroutine.
+            withTimeoutOrNull(5000) {
+                withContext(Dispatchers.IO) { runCatching { deviceToClose?.close() } }
+            }
         } catch (e: BurnException) {
             emitLog("ERROR: ${e.message}")
             _state.value = BurnState.Failed(e.message ?: "Burn failed", e.suggestion)

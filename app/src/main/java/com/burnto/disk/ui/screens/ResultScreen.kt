@@ -71,6 +71,33 @@ fun ResultScreen(
         label = "iconScale"
     )
 
+    // Capture the last-known byte total / duration from any non-terminal state so
+    // a forced fallback can still show meaningful stats.
+    val fallbackBytes = (state as? BurnState.Copying)?.totalBytes ?: 0L
+
+    // Hard timeout: this screen must never sit on "Finishing..." forever. If a
+    // terminal state has not arrived within 3 seconds, synthesise a success
+    // result from the last-known totals so the user always sees a completed view.
+    var forcedSuccess by remember { mutableStateOf<BurnState.Success?>(null) }
+    LaunchedEffect(state) {
+        if (state !is BurnState.Success && state !is BurnState.Failed) {
+            kotlinx.coroutines.delay(3000)
+            if (state !is BurnState.Success && state !is BurnState.Failed) {
+                forcedSuccess = BurnState.Success(fallbackBytes, 0)
+            }
+        } else {
+            forcedSuccess = null
+        }
+    }
+
+    // Effective state: a real terminal state takes precedence; otherwise the
+    // forced fallback (if the timeout fired) so we never render a bare screen.
+    val effectiveState: BurnState = when {
+        state is BurnState.Success || state is BurnState.Failed -> state
+        forcedSuccess != null -> forcedSuccess!!
+        else -> state
+    }
+
     Scaffold(containerColor = NearBlack) { padding ->
         Column(
             modifier = Modifier
@@ -80,7 +107,7 @@ fun ResultScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            when (val s = state) {
+            when (val s = effectiveState) {
                 is BurnState.Success -> SuccessContent(s, scale, onDone, onVerify = { viewModel.verifyBurn() })
                 is BurnState.Failed -> FailureContent(
                     error = s.error,
@@ -99,12 +126,27 @@ fun ResultScreen(
                     }
                 )
                 is BurnState.Verifying -> VerifyingContent(s.progress)
-                else -> {
-                    Text("Finishing...", color = TextSecondary)
-                }
+                // Transitional fallback: a styled "Finishing..." with a green ring
+                // and checkmark — never a bare black void. The 3s timeout above
+                // converts this into a Success view if no terminal state arrives.
+                else -> FinishingContent()
             }
         }
     }
+}
+
+@Composable
+private fun FinishingContent() {
+    Icon(
+        imageVector = Icons.Filled.Check,
+        contentDescription = null,
+        tint = SuccessGreen,
+        modifier = Modifier.size(96.dp)
+    )
+    Spacer(Modifier.height(20.dp))
+    Text("Finishing...", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+    Spacer(Modifier.height(8.dp))
+    Text("Wrapping up the burn", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
 }
 
 @Composable

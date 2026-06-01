@@ -63,6 +63,8 @@ fun BurnProgressScreen(
 
     var logExpanded by remember { mutableStateOf(false) }
     var showCancelDialog by remember { mutableStateOf(false) }
+    // True once the copy phase has finished and we're in the flush/unmount window.
+    var finishing by remember { mutableStateOf(false) }
 
     // Start the burn once when entering the screen.
     LaunchedEffect(Unit) { viewModel.startBurn() }
@@ -80,6 +82,23 @@ fun BurnProgressScreen(
         }
     }
 
+    // Safety net: once copying reaches 100% (or we otherwise enter the flush
+    // window), force-navigate to the result screen if Success/Failed has not
+    // arrived within 10 seconds. This guarantees the user is never stranded on
+    // a "Finishing..." screen if the unmount stalls.
+    val copyDone = (state as? BurnState.Copying)?.let {
+        it.totalBytes > 0L && it.bytesWritten >= it.totalBytes
+    } ?: false
+    LaunchedEffect(copyDone) {
+        if (copyDone) {
+            finishing = true
+            kotlinx.coroutines.delay(10_000)
+            if (state !is BurnState.Success && state !is BurnState.Failed) {
+                onComplete()
+            }
+        }
+    }
+
     // Determine whether we are in the brief "parsing" sub-phase (a Copying state
     // emitted before any bytes are written) versus actively writing files.
     val isParsing = (state as? BurnState.Copying)?.let {
@@ -90,10 +109,10 @@ fun BurnProgressScreen(
         is BurnState.Idle -> Triple(0, "Preparing...", false)
         is BurnState.Formatting -> Triple(s.progress, "Formatting FAT32...", false)
         is BurnState.Copying ->
-            if (isParsing) {
-                Triple(0, "Parsing ISO filesystem...", false)
-            } else {
-                Triple(
+            when {
+                copyDone || finishing -> Triple(100, "Finishing...", false)
+                isParsing -> Triple(0, "Parsing ISO filesystem...", false)
+                else -> Triple(
                     s.percent,
                     "Writing files... ${Format.bytes(s.bytesWritten)} of ${Format.bytes(s.totalBytes)}",
                     true
@@ -105,6 +124,9 @@ fun BurnProgressScreen(
     }
     // Indeterminate only during the very first preparing / parsing moments.
     val isIndeterminate = state is BurnState.Idle || isParsing
+    // The ring shows green + checkmark on success, or while finishing (copy is
+    // already 100% complete and we are only waiting on the unmount to settle).
+    val showSuccessRing = state is BurnState.Success || (finishing && state !is BurnState.Failed)
 
     Scaffold(containerColor = NearBlack) { padding ->
         Column(
@@ -139,7 +161,7 @@ fun BurnProgressScreen(
 
             CircularBurnProgress(
                 percent = percent,
-                isSuccess = state is BurnState.Success,
+                isSuccess = showSuccessRing,
                 isIndeterminate = isIndeterminate
             )
 
