@@ -78,6 +78,7 @@ class FastUsbWriter(
         // Reserved FAT entries.
         if (fat.size > 0) fat[0] = 0x0FFFFFF8.toInt()
         if (fat.size > 1) fat[1] = EOC
+        if (fat.size > 2) fat[2] = EOC  // root directory cluster (chain re-set on allocateRoot)
     }
 
     /**
@@ -393,8 +394,17 @@ class FastUsbWriter(
                 bufferStartLba = fileLba
             }
             buffer.put(data, 0, validLen)
-            // Zero-pad the tail of the file's last cluster.
-            for (i in validLen until paddedSize) buffer.put(0.toByte())
+            // Zero-pad the tail of the file's last cluster. Use Arrays.fill on the
+            // backing array (a fast JVM intrinsic) instead of a per-byte loop.
+            // NOTE: we cannot just advance the position — the buffer is reused
+            // across batches and clear() does not re-zero it, so the pad region
+            // could otherwise contain stale bytes from a previous file.
+            val padLen = paddedSize - validLen
+            if (padLen > 0) {
+                val pos = buffer.position()
+                java.util.Arrays.fill(buffer.array(), pos, pos + padLen, 0.toByte())
+                buffer.position(pos + padLen)
+            }
             filesInBatch++
             filesCoalesced++
         }

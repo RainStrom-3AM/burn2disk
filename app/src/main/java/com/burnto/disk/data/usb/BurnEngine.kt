@@ -109,14 +109,41 @@ class BurnEngine @Inject constructor(
 
     /**
      * Benchmarks raw write throughput at a few chunk sizes against a scratch
-     * region near the end of the device, and returns the fastest chunk size
-     * (clamped to a memory-safe range). Writing here is destructive but the
-     * region is well past where our FAT32 data will land for these ISOs, and the
-     * drive is about to be reformatted anyway.
+     * region in the very last 64 MiB of the device, and returns the fastest chunk
+     * size (clamped to a memory-safe range).
+     *
+     * Safety: this must run BEFORE [Fat32Formatter.format] and the file copy. The
+     * scratch LBA is validated to sit beyond the FAT32 data region that the burn
+     * will actually use, so the benchmark can never overwrite a file. On devices
+     * too small to carve out a safe scratch area, the benchmark is skipped and a
+     * 1 MiB default is used.
+     *
+     * @param dataEndLbaExclusive the first LBA past where the burn may allocate
+     *   clusters (dataStartLba + usedClusters * sectorsPerCluster). The scratch
+     *   region must start at or after this to be safe.
      */
-    private fun benchmarkChunkSize(blockDevice: me.jahnen.libaums.core.driver.BlockDeviceDriver): Int {
+    private fun benchmarkChunkSize(
+        blockDevice: me.jahnen.libaums.core.driver.BlockDeviceDriver,
+        dataEndLbaExclusive: Long
+    ): Int {
         val blockSize = blockDevice.blockSize
-        val scratchLba = (blockDevice.blocks - (64L * 1024 * 1024 / blockSize)).coerceAtLeast(1)
+
+        // Too small to carve out a safe scratch area → skip benchmarking.
+        val minSafeDevice = 200L * 1024 * 1024 / blockSize
+        if (blockDevice.blocks < minSafeDevice) {
+            emitLog("Device too small for benchmark, using 1MB chunk default")
+            return 1024 * 1024
+        }
+
+        val scratchSectors = 64L * 1024 * 1024 / blockSize
+        val scratchLba = (blockDevice.blocks - scratchSectors).coerceAtLeast(1)
+
+        // Guarantee the scratch sits beyond any region the burn will write.
+        if (scratchLba < dataEndLbaExclusive) {
+            emitLog("No safe scratch region (drive nearly full), using 1MB chunk default")
+            return 1024 * 1024
+        }
+
         val candidates = listOf(512 * 1024, 1024 * 1024, 2 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024)
         var bestSize = 1024 * 1024
         var bestSpeed = 0.0
@@ -352,6 +379,19 @@ class BurnEngine @Inject constructor(
             // fall back to the hint so geometry is still computed sanely.
             val formatCapacity = if (rawCapacity > 0L) rawCapacity else capacity
             val label = isoFile.nameWithoutExtension
+
+            // --- Benchmark BEFORE formatting / copying ---
+            // The scratch region is the last 64 MiB of the device; it must lie
+            // beyond everything the burn will write. Conservatively bound the
+            // burn's footprint as the ISO data plus a generous 256 MiB margin for
+            // reserved sectors, both FATs and directories.
+            val blockSizeBytes = raw.blockSize.toLong()
+            val partitionStartLbaPre = (1L shl 20) / raw.blockSize
+            val burstMarginBytes = 256L * 1024 * 1024
+            val dataEndLbaExclusive =
+                partitionStartLbaPre + ((isoSize + burstMarginBytes) / blockSizeBytes)
+            val optimalChunk = benchmarkChunkSize(raw.blockDevice, dataEndLbaExclusive)
+
             _state.value = BurnState.Formatting(0)
             emitLog("Formatting FAT32...")
             val geometry = Fat32Formatter(raw.blockDevice).format(formatCapacity, label) { pct ->
@@ -390,9 +430,6 @@ class BurnEngine @Inject constructor(
                 }
             }
             emitLog("${entries.size} entries found")
-
-            // --- Step 4b: benchmark optimal write chunk size ---
-            val optimalChunk = benchmarkChunkSize(raw.blockDevice)
 
             // --- Steps 5-7: fast copy (direct block writes) ---
             // If the fast path fails for any reason, fall back to the (slow but
