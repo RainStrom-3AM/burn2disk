@@ -595,18 +595,67 @@ class BurnEngine @Inject constructor(
         }
 
         // --- File pass: regular ISO files ---
+        // Sort largest-first so the big files write directly and all the small
+        // files end up grouped in the contiguous tail of the allocation, where
+        // the batcher can coalesce them into a few large SCSI writes.
+        val sortedFiles = regularFiles.sortedByDescending { it.sizeBytes }
+        val SMALL_FILE_LIMIT = 4L * 1024 * 1024   // batch files under 4 MiB
+        val LOG_INDIVIDUAL_MIN = 64L * 1024       // files >= 64 KiB still log individually
+
+        val batcher = writer.newBatcher()
+        var batchedSmallCount = 0
+        var batchedSmallGroupDir = ""
+
+        // Flushes the "N small files" grouped log line when the small-file run ends.
+        fun flushSmallLog() {
+            if (batchedSmallCount > 0) {
+                emitLog("Writing $batchedSmallCount small files... ($batchedSmallGroupDir)", isFileName = true)
+                batchedSmallCount = 0
+            }
+        }
+
         val raf = RandomAccessFile(isoFile, "r")
         raf.use {
-            for (entry in regularFiles) {
+            for (entry in sortedFiles) {
                 coroutineContext.ensureActive()
                 val parentPath = entry.fullPath.substringBeforeLast('/', "")
                 val clusters = clustersFor(entry.sizeBytes)
                 val firstCluster = writer.allocateClusters(clusters)
                 writer.writeFatChain(firstCluster, clusters)
                 writer.addDirectoryEntry(parentPath, entry.name, firstCluster, entry.sizeBytes, isDirectory = false)
-                emitLog(entry.fullPath, isFileName = true)
-                writer.writeFileFromIso(raf, entry.extentLba, entry.sizeBytes, firstCluster, onChunk)
+
+                val fileLba = writer.lbaOfCluster(firstCluster)
+                val paddedSize = writer.paddedClusterBytes(entry.sizeBytes)
+                val small = entry.sizeBytes in 1 until SMALL_FILE_LIMIT && batcher.canHold(paddedSize)
+
+                if (small) {
+                    // Read the small file fully and hand it to the coalescing batcher.
+                    raf.seek(entry.extentLba * ISO_SECTOR)
+                    val data = ByteArray(entry.sizeBytes.toInt())
+                    raf.readFully(data)
+                    batcher.queue(data, data.size, fileLba)
+                    onChunk(entry.sizeBytes)
+
+                    if (entry.sizeBytes < LOG_INDIVIDUAL_MIN) {
+                        batchedSmallCount++
+                        batchedSmallGroupDir = if (parentPath.isEmpty()) "/" else "$parentPath/"
+                    } else {
+                        flushSmallLog()
+                        emitLog(entry.fullPath, isFileName = true)
+                    }
+                } else {
+                    // Large (or zero-length) file: drain pending small files first
+                    // so ordering/contiguity is preserved, then stream it directly
+                    // with the read-ahead pipeline (overlaps ISO read + USB write).
+                    batcher.flush()
+                    flushSmallLog()
+                    emitLog(entry.fullPath, isFileName = true)
+                    writer.writeFileFromIsoPipelined(raf, entry.extentLba, entry.sizeBytes, firstCluster, onChunk)
+                }
             }
+            // Drain any remaining batched small files.
+            batcher.flush()
+            flushSmallLog()
         }
 
         // --- File pass: split WIM parts (already on local disk) ---
@@ -629,6 +678,14 @@ class BurnEngine @Inject constructor(
         writer.flushDirectories()
         writer.flushFat()
         writer.updateFsInfo()
+
+        // Coalescing efficiency summary.
+        val coalesced = batcher.coalescedFiles
+        val batchWrites = batcher.batchWrites
+        if (coalesced > 0 && batchWrites > 0) {
+            val pct = (100 - (batchWrites * 100 / coalesced.coerceAtLeast(1))).coerceIn(0, 100)
+            emitLog("Write efficiency: $coalesced small files → $batchWrites batch writes ($pct% coalesced)")
+        }
 
         // Final 100% copy state.
         _state.value = BurnState.Copying(

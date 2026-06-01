@@ -1,8 +1,11 @@
 package com.burnto.disk.data.usb
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.Channel
 import me.jahnen.libaums.core.driver.BlockDeviceDriver
 import java.io.IOException
 import java.io.RandomAccessFile
@@ -251,6 +254,172 @@ class FastUsbWriter(
             }
         }
         written
+    }
+
+    /** Absolute device LBA of a cluster (exposed for the write batcher). */
+    fun lbaOfCluster(cluster: Long): Long = geo.clusterToLba(cluster)
+
+    /**
+     * Streams a large file from the ISO to its contiguous cluster run using a
+     * read-ahead pipeline: a producer coroutine reads the next chunk from the ISO
+     * (fast internal storage) while the consumer writes the previous chunk to USB
+     * (slow). A bounded [kotlinx.coroutines.channels.Channel] of pre-filled
+     * buffers (FIFO) preserves order; the consumer advances the LBA
+     * deterministically, so data always lands contiguously and in sequence.
+     */
+    suspend fun writeFileFromIsoPipelined(
+        raf: RandomAccessFile,
+        extentLba: Long,
+        sizeBytes: Long,
+        firstCluster: Long,
+        onProgress: (Long) -> Unit
+    ): Long {
+        if (sizeBytes == 0L) return 0L
+        val isoSector = 2048L
+        val startLba = geo.clusterToLba(firstCluster)
+
+        return kotlinx.coroutines.coroutineScope {
+            // Channel carries (buffer, validLen). Capacity 2 = at most 2 chunks in
+            // flight so memory stays bounded (3 buffers total incl. the one being
+            // written). Buffers are heap-backed (libaums needs .array()).
+            val channel = Channel<Pair<ByteBuffer, Int>>(capacity = 2)
+
+            val producer = launch(Dispatchers.IO) {
+                raf.seek(extentLba * isoSector)
+                var remaining = sizeBytes
+                val tmp = ByteArray(optimalChunkBytes)
+                try {
+                    while (remaining > 0) {
+                        coroutineContext.ensureActive()
+                        val toRead = minOf(optimalChunkBytes.toLong(), remaining).toInt()
+                        raf.readFully(tmp, 0, toRead)
+                        val padded = ((toRead + bytesPerSector - 1) / bytesPerSector) * bytesPerSector
+                        val buf = ByteBuffer.allocate(padded)
+                        buf.put(tmp, 0, toRead)
+                        buf.position(0)
+                        buf.limit(padded)
+                        channel.send(buf to toRead)
+                        remaining -= toRead
+                    }
+                } finally {
+                    channel.close()
+                }
+            }
+
+            var lba = startLba
+            var written = 0L
+            withContext(Dispatchers.IO) {
+                for ((buf, validLen) in channel) {
+                    coroutineContext.ensureActive()
+                    blockDevice.write(lba, buf)
+                    lba += (buf.limit() / bytesPerSector).toLong()
+                    written += validLen
+                    onProgress(validLen.toLong())
+                }
+            }
+            producer.join()
+            written
+        }
+    }
+
+    /** Bytes a file of [sizeBytes] occupies once padded to whole clusters. */
+    fun paddedClusterBytes(sizeBytes: Long): Int {
+        val clusters = if (sizeBytes == 0L) 1L else (sizeBytes + clusterBytes - 1) / clusterBytes
+        return (clusters * clusterBytes).toInt()
+    }
+
+    /** Creates a coalescing write batcher bound to this writer's block device. */
+    fun newBatcher(): WriteBatcher = WriteBatcher()
+
+    /**
+     * Coalesces many small files into a single large SCSI WRITE.
+     *
+     * libaums issues one WRITE(10) per [BlockDeviceDriver.write] call, so writing
+     * hundreds of tiny files individually is dominated by per-command overhead.
+     * This accumulates consecutive files' (cluster-padded) data into one heap
+     * buffer and flushes the whole run in a single write.
+     *
+     * Correctness: a single write must target one contiguous LBA region, so the
+     * batcher only appends a file when its start LBA equals the LBA immediately
+     * after the buffered data. A non-contiguous file (or a full buffer) forces a
+     * flush and starts a fresh batch — it can never land data at the wrong LBA.
+     *
+     * The buffer is a HEAP [ByteBuffer] (not direct): libaums' bulk transfer calls
+     * `buffer.array()`, which throws on direct buffers.
+     */
+    inner class WriteBatcher {
+        // 80% of currently-available heap, capped at 32 MiB, floored at the
+        // benchmarked chunk size, rounded down to a whole number of clusters.
+        private var bufferSize: Int = computeBufferSize()
+        private var buffer: ByteBuffer = ByteBuffer.allocate(bufferSize)
+        private var bufferStartLba: Long = -1L
+        private var filesInBatch: Int = 0
+        private var flushCount: Int = 0
+        private var filesCoalesced: Int = 0
+
+        val batchWrites: Int get() = flushCount
+        val coalescedFiles: Int get() = filesCoalesced
+
+        private fun computeBufferSize(): Int {
+            val rt = Runtime.getRuntime()
+            val avail = rt.maxMemory() - rt.totalMemory() + rt.freeMemory()
+            val target = minOf((avail * 0.8).toLong(), 32L * 1024 * 1024)
+                .toInt().coerceAtLeast(optimalChunkBytes)
+            // Round down to a whole number of clusters (>= 1 cluster).
+            return (target / clusterBytes).coerceAtLeast(1) * clusterBytes
+        }
+
+        /** Largest single file (padded) this batcher's buffer can hold. */
+        fun canHold(paddedSize: Int): Boolean = paddedSize <= bufferSize
+
+        /** LBA the next contiguous file must start at to extend the batch. */
+        private fun expectedNextLba(): Long =
+            bufferStartLba + (buffer.position() / bytesPerSector)
+
+        /**
+         * Appends one file's pre-read bytes to the batch, flushing first if it is
+         * not contiguous with the current batch or would overflow the buffer.
+         */
+        suspend fun queue(data: ByteArray, validLen: Int, fileLba: Long) {
+            val paddedSize = run {
+                val clusters = ((validLen + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
+                clusters * clusterBytes
+            }
+            val contiguous = bufferStartLba != -1L && fileLba == expectedNextLba()
+            if (buffer.position() == 0) {
+                bufferStartLba = fileLba
+            } else if (!contiguous || paddedSize > buffer.remaining()) {
+                flush()
+                bufferStartLba = fileLba
+            }
+            buffer.put(data, 0, validLen)
+            // Zero-pad the tail of the file's last cluster.
+            for (i in validLen until paddedSize) buffer.put(0.toByte())
+            filesInBatch++
+            filesCoalesced++
+        }
+
+        /** Writes the accumulated buffer to the device in a single write. */
+        suspend fun flush() = withContext(Dispatchers.IO) {
+            if (buffer.position() == 0) return@withContext
+            val len = buffer.position()
+            buffer.position(0)
+            buffer.limit(len)
+            blockDevice.write(bufferStartLba, buffer)
+            buffer.clear()
+            bufferStartLba = -1L
+            filesInBatch = 0
+            flushCount++
+
+            // Memory guard: if free heap is getting tight, shrink the buffer for
+            // the rest of the burn to avoid OOM on low-RAM devices.
+            val rt = Runtime.getRuntime()
+            val avail = rt.maxMemory() - rt.totalMemory() + rt.freeMemory()
+            if (avail < 20L * 1024 * 1024 && bufferSize > clusterBytes * 2) {
+                bufferSize = (bufferSize / 2 / clusterBytes).coerceAtLeast(1) * clusterBytes
+                buffer = ByteBuffer.allocate(bufferSize)
+            }
+        }
     }
 
     /** Writes every queued directory's entries to its cluster run. */
