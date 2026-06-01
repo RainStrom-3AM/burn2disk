@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -102,6 +103,7 @@ fun BrowseUsbScreen(
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 when (current) {
                     is BrowseState.Loading -> CircularProgressIndicator(color = Amber)
+                    is BrowseState.RequestingPermission -> PermissionPrompt()
                     is BrowseState.NoDevice -> CenterText(
                         "No USB drive connected. Connect a drive via OTG."
                     )
@@ -205,6 +207,36 @@ private fun FileRow(
             Spacer(Modifier.size(12.dp))
             Text(text = sizeText, style = MonoText.small, color = TextSecondary)
         }
+    }
+}
+
+@Composable
+private fun PermissionPrompt() {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(32.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Usb,
+            contentDescription = null,
+            tint = Amber,
+            modifier = Modifier.size(64.dp)
+        )
+        Spacer(Modifier.height(20.dp))
+        Text(
+            "Allow USB access",
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Tap Allow when Android asks for permission",
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary
+        )
+        Spacer(Modifier.height(24.dp))
+        CircularProgressIndicator(color = Amber, modifier = Modifier.size(28.dp))
     }
 }
 

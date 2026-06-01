@@ -31,6 +31,7 @@ data class UsbFileEntry(
 sealed class BrowseState {
     data object Loading : BrowseState()
     data object NoDevice : BrowseState()
+    data object RequestingPermission : BrowseState()
     data class Error(val message: String) : BrowseState()
     data class Listing(
         val path: String,
@@ -78,35 +79,51 @@ class UsbBrowserViewModel @Inject constructor(
     fun open() {
         viewModelScope.launch {
             _state.value = BrowseState.Loading
-            val result = withContext(Dispatchers.IO) { mountAndScan() }
-            _state.value = result
-        }
-    }
 
-    private fun mountAndScan(): BrowseState {
-        return try {
-            val devices = usbDeviceManager.rawDevices()
-            if (devices.isEmpty()) return BrowseState.NoDevice
+            // --- Step 1: find the device ---
+            val devices = runCatching { usbDeviceManager.rawDevices() }.getOrDefault(emptyList())
+            if (devices.isEmpty()) {
+                _state.value = BrowseState.NoDevice
+                return@launch
+            }
             val msd = devices.first()
             val usbDevice = msd.usbDevice
             _deviceName.value = runCatching {
                 usbDevice.productName ?: usbDevice.manufacturerName ?: "USB Drive"
             }.getOrDefault("USB Drive")
 
+            // --- Step 2: ensure USB permission (suspends on the system dialog) ---
             if (!usbManager.hasPermission(usbDevice)) {
-                // Permission must already be granted from a prior burn/format;
-                // requesting here would need a suspend round-trip. Surface clearly.
-                return BrowseState.Error("USB permission needed — connect and allow access, then retry.")
+                _state.value = BrowseState.RequestingPermission
+                val granted = runCatching { usbDeviceManager.requestPermission(usbDevice) }
+                    .getOrDefault(false)
+                if (!granted) {
+                    _state.value = BrowseState.Error(
+                        "USB permission denied. Tap BROWSE USB again and allow access."
+                    )
+                    return@launch
+                }
             }
 
+            // --- Step 3: open + mount + list (off the main thread) ---
+            _state.value = BrowseState.Loading
+            val result = withContext(Dispatchers.IO) { mountAndScan(usbDevice) }
+            _state.value = result
+        }
+    }
+
+    private fun mountAndScan(usbDevice: android.hardware.usb.UsbDevice): BrowseState {
+        var opened: RawUsbBlockDevice? = null
+        return try {
             val device = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
+            opened = device
             raw = device
             val partitionStartLba = (1L shl 20) / device.blockSize
             val partitionDevice = me.jahnen.libaums.core.driver.ByteBlockDevice(
                 device.blockDevice, partitionStartLba.toInt()
             )
             val mounted = Fat32FileSystem.read(partitionDevice)
-                ?: return BrowseState.Error("Could not read the filesystem on this drive.")
+                ?: return BrowseState.Error("Could not read filesystem. Try formatting the drive first.")
             fs = mounted
 
             // One-time drive-wide totals (files + bytes).
@@ -120,6 +137,11 @@ class UsbBrowserViewModel @Inject constructor(
             backStack.addLast("")
             listing("")
         } catch (e: Exception) {
+            // Release the device on failure so the next burn/format can claim it.
+            if (fs == null) {
+                runCatching { opened?.close() }
+                if (raw === opened) raw = null
+            }
             BrowseState.Error(e.message ?: "Failed to read USB drive")
         }
     }
