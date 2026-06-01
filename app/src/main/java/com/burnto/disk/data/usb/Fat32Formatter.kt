@@ -5,6 +5,29 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
+ * Geometry of a freshly formatted FAT32 volume, returned by [Fat32Formatter.format]
+ * so the fast writer can address the FAT and data regions directly (in absolute
+ * device LBAs).
+ */
+data class FatGeometry(
+    val partitionStartLba: Long,
+    val bytesPerSector: Int,
+    val sectorsPerCluster: Int,
+    val reservedSectors: Int,
+    val numFats: Int,
+    val fatSizeSectors: Long,
+    val fatStartLba: Long,
+    val fat2StartLba: Long,
+    val dataStartLba: Long,
+    val rootCluster: Long,
+    val totalClusters: Long,
+    val fsInfoLba: Long
+) {
+    val clusterBytes: Long get() = sectorsPerCluster.toLong() * bytesPerSector
+    fun clusterToLba(cluster: Long): Long = dataStartLba + (cluster - 2) * sectorsPerCluster
+}
+
+/**
  * A minimal, dependency-free FAT32 formatter that writes a fresh, bootable
  * filesystem directly to a raw, LBA-addressed [BlockDeviceDriver].
  *
@@ -48,18 +71,18 @@ class Fat32Formatter(
     }
 
     /**
-     * Formats the device as FAT32 within a single MBR partition.
+     * Formats the device as FAT32 within a single MBR partition and returns the
+     * resulting [FatGeometry] for direct block-level writing.
      *
      * @param totalBytes usable capacity of the whole device in bytes.
      * @param volumeLabel up to 11 chars; uppercased and padded.
-     * @param onProgress 0-100 progress callback. Formatting is now near-instant
-     *   since the FATs are no longer fully zeroed.
+     * @param onProgress 0-100 progress callback.
      */
     fun format(
         totalBytes: Long,
         volumeLabel: String,
         onProgress: (Int) -> Unit = {}
-    ) {
+    ): FatGeometry {
         require(blockSize >= 512) { "Unsupported block size $blockSize" }
         val bytesPerSector = blockSize
         val deviceSectors = totalBytes / bytesPerSector
@@ -97,21 +120,39 @@ class Fat32Formatter(
         writeSectorAbs(partitionStartLba + BACKUP_BOOT_SECTOR + FSINFO_SECTOR, fsInfo)
         onProgress(6)
 
-        // --- Initialise FATs (reserved + root-dir chain entries only) ---
-        // We intentionally do NOT zero the full FATs. On a 28 GB drive the two
-        // FATs are ~56 MB; zeroing them one SCSI burst at a time takes minutes.
-        // FAT32 only requires cluster 0/1 plus the root-dir EOC marker to be
-        // valid — the OS and libaums treat unwritten FAT entries as free
-        // (0x00000000), and the file copy allocates clusters fresh afterward.
+        // --- Initialise FATs ---
+        // Now that file writes go through the fast direct path, the formatter only
+        // lays down the reserved cluster entries (cluster 0/1 + root-dir EOC). The
+        // FastUsbWriter zeroes the FAT region in large bursts and writes every
+        // allocated cluster chain itself, so unused entries are explicitly 0.
         writeFatHeads(partitionStartLba, fatSizeSectors, bytesPerSector)
-        onProgress(80)
+        onProgress(90)
 
         // --- Root directory cluster: only the volume-label entry ---
+        // (FastUsbWriter rewrites the root cluster with the real directory entries,
+        //  preserving this volume-label entry at the head.)
         val firstDataSector = partitionStartLba + RESERVED_SECTORS + NUM_FATS * fatSizeSectors
         val rootDirSector = firstDataSector + (ROOT_CLUSTER - 2) * sectorsPerCluster
         writeRootDirectory(rootDirSector, sectorsPerCluster, bytesPerSector, volumeLabel)
 
         onProgress(100)
+
+        val fatStartLba = partitionStartLba + RESERVED_SECTORS
+        val fat2StartLba = fatStartLba + fatSizeSectors
+        return FatGeometry(
+            partitionStartLba = partitionStartLba,
+            bytesPerSector = bytesPerSector,
+            sectorsPerCluster = sectorsPerCluster,
+            reservedSectors = RESERVED_SECTORS,
+            numFats = NUM_FATS,
+            fatSizeSectors = fatSizeSectors,
+            fatStartLba = fatStartLba,
+            fat2StartLba = fat2StartLba,
+            dataStartLba = firstDataSector,
+            rootCluster = ROOT_CLUSTER,
+            totalClusters = clusterCount, // number of addressable data clusters (numbered 2..clusterCount+1)
+            fsInfoLba = partitionStartLba + FSINFO_SECTOR
+        )
     }
 
     /** Standard FAT32 FAT-size formula (FatGen103). */
