@@ -31,6 +31,7 @@ import com.burnto.disk.ui.theme.Amber
 import com.burnto.disk.ui.theme.MonoText
 import com.burnto.disk.ui.theme.SurfaceDark
 import com.burnto.disk.ui.theme.TextSecondary
+import com.burnto.disk.ui.theme.WarningYellow
 
 /**
  * A collapsible, auto-scrolling log. Filenames render in amber mono; status
@@ -86,7 +87,11 @@ fun BurnLog(
                     Text(
                         text = line.message,
                         style = MonoText.small,
-                        color = if (line.isFileName) Amber else TextSecondary
+                        color = when {
+                            line.isWarning -> WarningYellow
+                            line.isFileName -> Amber
+                            else -> TextSecondary
+                        }
                     )
                 }
             }

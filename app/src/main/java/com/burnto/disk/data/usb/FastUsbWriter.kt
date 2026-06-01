@@ -106,6 +106,7 @@ class FastUsbWriter(
         val first = allocateClusters(clusterCount)
         check(first == rootCluster) { "root cluster mismatch" }
         writeFatChain(first, clusterCount)
+        flushFatSectors(first, clusterCount)
     }
 
     /**
@@ -131,9 +132,37 @@ class FastUsbWriter(
     fun writeFatChain(firstCluster: Long, clusterCount: Long) {
         if (clusterCount == 0L) return
         for (i in 0 until clusterCount) {
-            val cluster = (firstCluster + i).toInt()
-            fat[cluster] = if (i == clusterCount - 1) EOC else (firstCluster + i + 1).toInt()
+            val index = (firstCluster + i).toInt()
+            if (index < 0 || index >= fat.size) {
+                throw IOException("Cluster $index out of FAT bounds (size=${fat.size})")
+            }
+            fat[index] = if (i == clusterCount - 1) EOC else (firstCluster + i + 1).toInt()
         }
+    }
+
+    /**
+     * Immediately flushes only the FAT sectors that hold the entries for the
+     * cluster run [firstCluster]..[firstCluster+clusterCount-1], to both FAT
+     * copies. Called right after each [writeFatChain] so a file's chain is on
+     * disk as soon as its data is — if the burn is interrupted, completed files
+     * remain visible/recoverable instead of appearing as 0 bytes.
+     */
+    fun flushFatSectors(firstCluster: Long, clusterCount: Long) {
+        if (clusterCount == 0L) return
+        val entriesPerSector = bytesPerSector / 4
+        val firstSector = firstCluster / entriesPerSector
+        val lastSector = (firstCluster + clusterCount - 1) / entriesPerSector
+        val count = (lastSector - firstSector + 1).toInt()
+        val buf = ByteBuffer.allocate(count * bytesPerSector).order(ByteOrder.LITTLE_ENDIAN)
+        val baseEntry = firstSector * entriesPerSector
+        for (i in 0 until count * entriesPerSector) {
+            val idx = (baseEntry + i)
+            buf.putInt(i * 4, if (idx < fat.size) fat[idx.toInt()] else 0)
+        }
+        buf.position(0); buf.limit(count * bytesPerSector)
+        blockDevice.write(geo.fatStartLba + firstSector, buf)
+        buf.position(0); buf.limit(count * bytesPerSector)
+        blockDevice.write(geo.fat2StartLba + firstSector, buf)
     }
 
     /** Registers a subdirectory so its children can be added by path. */
@@ -448,34 +477,23 @@ class FastUsbWriter(
     }
 
     /** Flushes the in-memory FAT to both FAT copies in large bursts. */
+    /**
+     * Finalises the FAT. The region was zeroed at format time and every allocated
+     * chain was flushed incrementally via [flushFatSectors] as its file was
+     * written, so here we only need to (re)write the reserved first sector of each
+     * FAT copy — making finalisation nearly instant instead of a multi-MB end
+     * phase that froze the progress UI.
+     */
     fun flushFat() {
-        val totalFatBytes = geo.fatSizeSectors * bytesPerSector
-        val burstSectors = (FAT_FLUSH_BURST / bytesPerSector).coerceAtLeast(1)
-        val burstBytes = burstSectors * bytesPerSector
-        val buf = ByteBuffer.allocate(burstBytes).order(ByteOrder.LITTLE_ENDIAN)
-
-        var sectorOffset = 0L
-        val totalSectors = geo.fatSizeSectors
-        while (sectorOffset < totalSectors) {
-            val sectorsThisBurst = minOf(burstSectors.toLong(), totalSectors - sectorOffset).toInt()
-            val bytesThisBurst = sectorsThisBurst * bytesPerSector
-            buf.clear()
-            // Fill this burst from the FAT model.
-            val firstEntry = (sectorOffset * bytesPerSector / 4)
-            val entriesThisBurst = bytesThisBurst / 4
-            for (i in 0 until entriesThisBurst) {
-                val entryIndex = (firstEntry + i)
-                val value = if (entryIndex < fat.size) fat[entryIndex.toInt()] else 0
-                buf.putInt(i * 4, value)
-            }
-            buf.position(0)
-            buf.limit(bytesThisBurst)
-            blockDevice.write(geo.fatStartLba + sectorOffset, buf)
-            buf.position(0)
-            buf.limit(bytesThisBurst)
-            blockDevice.write(geo.fat2StartLba + sectorOffset, buf)
-            sectorOffset += sectorsThisBurst
+        val entriesPerSector = bytesPerSector / 4
+        val buf = ByteBuffer.allocate(bytesPerSector).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until entriesPerSector) {
+            buf.putInt(i * 4, if (i < fat.size) fat[i] else 0)
         }
+        buf.position(0); buf.limit(bytesPerSector)
+        blockDevice.write(geo.fatStartLba, buf)
+        buf.position(0); buf.limit(bytesPerSector)
+        blockDevice.write(geo.fat2StartLba, buf)
     }
 
     /** Updates the FSInfo sector with the real free-cluster count and next-free hint. */

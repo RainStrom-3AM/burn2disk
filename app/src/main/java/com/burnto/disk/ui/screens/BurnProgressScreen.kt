@@ -1,5 +1,6 @@
 package com.burnto.disk.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -128,6 +129,10 @@ fun BurnProgressScreen(
     // already 100% complete and we are only waiting on the unmount to settle).
     val showSuccessRing = state is BurnState.Success || (finishing && state !is BurnState.Failed)
 
+    // Root-cause-1 visibility: if the engine logged a fallback to the slow path,
+    // surface a persistent warning banner so the slowdown is never silent.
+    val compatibilityMode = logLines.any { it.message.contains("compatibility mode") }
+
     Scaffold(containerColor = NearBlack) { padding ->
         Column(
             modifier = Modifier
@@ -137,6 +142,28 @@ fun BurnProgressScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(Modifier.height(24.dp))
+
+            // Compatibility-mode warning banner (visible whenever the fast writer
+            // fell back to the slow libaums path).
+            if (compatibilityMode) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .background(
+                            com.burnto.disk.ui.theme.WarningYellow.copy(alpha = 0.15f),
+                            RoundedCornerShape(10.dp)
+                        )
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "⚠ Using compatibility mode — burn will be slower",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = com.burnto.disk.ui.theme.WarningYellow
+                    )
+                }
+            }
 
             // ISO -> device header with arrow.
             Row(verticalAlignment = Alignment.CenterVertically) {

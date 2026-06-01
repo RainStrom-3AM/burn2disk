@@ -107,62 +107,6 @@ class BurnEngine @Inject constructor(
         return secs.toInt().coerceIn(0, 86_400)
     }
 
-    /**
-     * Benchmarks raw write throughput at a few chunk sizes against a scratch
-     * region in the very last 64 MiB of the device, and returns the fastest chunk
-     * size (clamped to a memory-safe range).
-     *
-     * Safety: this must run BEFORE [Fat32Formatter.format] and the file copy. The
-     * scratch LBA is validated to sit beyond the FAT32 data region that the burn
-     * will actually use, so the benchmark can never overwrite a file. On devices
-     * too small to carve out a safe scratch area, the benchmark is skipped and a
-     * 1 MiB default is used.
-     *
-     * @param dataEndLbaExclusive the first LBA past where the burn may allocate
-     *   clusters (dataStartLba + usedClusters * sectorsPerCluster). The scratch
-     *   region must start at or after this to be safe.
-     */
-    private fun benchmarkChunkSize(
-        blockDevice: me.jahnen.libaums.core.driver.BlockDeviceDriver,
-        dataEndLbaExclusive: Long
-    ): Int {
-        val blockSize = blockDevice.blockSize
-
-        // Too small to carve out a safe scratch area → skip benchmarking.
-        val minSafeDevice = 200L * 1024 * 1024 / blockSize
-        if (blockDevice.blocks < minSafeDevice) {
-            emitLog("Device too small for benchmark, using 1MB chunk default")
-            return 1024 * 1024
-        }
-
-        val scratchSectors = 64L * 1024 * 1024 / blockSize
-        val scratchLba = (blockDevice.blocks - scratchSectors).coerceAtLeast(1)
-
-        // Guarantee the scratch sits beyond any region the burn will write.
-        if (scratchLba < dataEndLbaExclusive) {
-            emitLog("No safe scratch region (drive nearly full), using 1MB chunk default")
-            return 1024 * 1024
-        }
-
-        val candidates = listOf(512 * 1024, 1024 * 1024, 2 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024)
-        var bestSize = 1024 * 1024
-        var bestSpeed = 0.0
-        for (size in candidates) {
-            val result = runCatching {
-                val buf = ByteBuffer.allocate(size)
-                val t0 = System.nanoTime()
-                repeat(3) { buf.clear(); blockDevice.write(scratchLba, buf) }
-                val elapsed = (System.nanoTime() - t0) / 1e9
-                if (elapsed <= 0.0) 0.0 else (size.toLong() * 3) / elapsed
-            }.getOrDefault(0.0)
-            if (result > bestSpeed) { bestSpeed = result; bestSize = size }
-        }
-        val clamp = (Runtime.getRuntime().maxMemory() / 4).toInt().coerceAtLeast(512 * 1024)
-        val result = bestSize.coerceIn(512 * 1024, clamp)
-        emitLog("USB benchmark: ${String.format("%.1f", bestSpeed / 1024 / 1024)} MB/s — chunk ${result / 1024}KB")
-        return result
-    }
-
     fun resetState() {
         _state.value = BurnState.Idle
     }
@@ -324,8 +268,8 @@ class BurnEngine @Inject constructor(
         }
     }
 
-    private fun emitLog(message: String, isFileName: Boolean = false) {
-        _log.tryEmit(BurnLogLine(message, isFileName))
+    private fun emitLog(message: String, isFileName: Boolean = false, isWarning: Boolean = false) {
+        _log.tryEmit(BurnLogLine(message, isFileName, isWarning))
     }
 
     /**
@@ -380,17 +324,12 @@ class BurnEngine @Inject constructor(
             val formatCapacity = if (rawCapacity > 0L) rawCapacity else capacity
             val label = isoFile.nameWithoutExtension
 
-            // --- Benchmark BEFORE formatting / copying ---
-            // The scratch region is the last 64 MiB of the device; it must lie
-            // beyond everything the burn will write. Conservatively bound the
-            // burn's footprint as the ISO data plus a generous 256 MiB margin for
-            // reserved sectors, both FATs and directories.
-            val blockSizeBytes = raw.blockSize.toLong()
-            val partitionStartLbaPre = (1L shl 20) / raw.blockSize
-            val burstMarginBytes = 256L * 1024 * 1024
-            val dataEndLbaExclusive =
-                partitionStartLbaPre + ((isoSize + burstMarginBytes) / blockSizeBytes)
-            val optimalChunk = benchmarkChunkSize(raw.blockDevice, dataEndLbaExclusive)
+            // Chunk size from available heap — no benchmark. The real bottleneck
+            // is the number of SCSI commands (fixed ~ms overhead each), so bigger
+            // chunks always win; we just size to memory. 2–8 MiB.
+            val optimalChunk = (Runtime.getRuntime().maxMemory() / 8)
+                .toInt().coerceIn(2 * 1024 * 1024, 8 * 1024 * 1024)
+            emitLog("Write chunk size: ${optimalChunk / 1024 / 1024}MB")
 
             _state.value = BurnState.Formatting(0)
             emitLog("Formatting FAT32...")
@@ -440,7 +379,7 @@ class BurnEngine @Inject constructor(
             } catch (ce: kotlinx.coroutines.CancellationException) {
                 throw ce
             } catch (fastError: Exception) {
-                emitLog("Fast writer failed (${fastError.message}); falling back to compatibility mode")
+                emitLog("⚠ Fast writer failed (${fastError.message}); falling back to compatibility mode", isWarning = true)
                 // Re-format to clear any partial structures, then remount and copy
                 // via libaums.
                 _state.value = BurnState.Formatting(0)
@@ -601,6 +540,7 @@ class BurnEngine @Inject constructor(
             val clusters = clustersFor(dirBytes)
             val firstCluster = writer.allocateClusters(clusters)
             writer.writeFatChain(firstCluster, clusters)
+            writer.flushFatSectors(firstCluster, clusters)
             writer.registerDirectory(d.fullPath, firstCluster)
             val parentPath = d.fullPath.substringBeforeLast('/', "")
             val parentCluster = if (parentPath.isEmpty()) geometry.rootCluster
@@ -659,6 +599,7 @@ class BurnEngine @Inject constructor(
                 val clusters = clustersFor(entry.sizeBytes)
                 val firstCluster = writer.allocateClusters(clusters)
                 writer.writeFatChain(firstCluster, clusters)
+                writer.flushFatSectors(firstCluster, clusters)
                 writer.addDirectoryEntry(parentPath, entry.name, firstCluster, entry.sizeBytes, isDirectory = false)
 
                 val fileLba = writer.lbaOfCluster(firstCluster)
@@ -704,6 +645,7 @@ class BurnEngine @Inject constructor(
             val clusters = clustersFor(size)
             val firstCluster = writer.allocateClusters(clusters)
             writer.writeFatChain(firstCluster, clusters)
+            writer.flushFatSectors(firstCluster, clusters)
             writer.addDirectoryEntry(parentPath, name, firstCluster, size, isDirectory = false)
             emitLog(usbPath, isFileName = true)
             writer.writeLocalFile(partFile, firstCluster, onChunk)

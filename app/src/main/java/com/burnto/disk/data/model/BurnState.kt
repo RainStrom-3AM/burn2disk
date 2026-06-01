@@ -30,5 +30,6 @@ sealed class BurnState {
 /** A single appended line in the live burn log. */
 data class BurnLogLine(
     val message: String,
-    val isFileName: Boolean = false
+    val isFileName: Boolean = false,
+    val isWarning: Boolean = false
 )

@@ -129,10 +129,12 @@ class Fat32Formatter(
         onProgress(6)
 
         // --- Initialise FATs ---
-        // Now that file writes go through the fast direct path, the formatter only
-        // lays down the reserved cluster entries (cluster 0/1 + root-dir EOC). The
-        // FastUsbWriter zeroes the FAT region in large bursts and writes every
-        // allocated cluster chain itself, so unused entries are explicitly 0.
+        // Zero the entire FAT region first (large sequential bursts, shown under
+        // the Formatting progress) so every unused cluster entry is 0 (free).
+        // This is required for a correct free-space map and to avoid stale chains
+        // from a previously-used drive. The burn then flushes each allocated
+        // chain incrementally, and the reserved entries are written below.
+        zeroFatRegion(partitionStartLba, fatSizeSectors, bytesPerSector, onProgress)
         writeFatHeads(partitionStartLba, fatSizeSectors, bytesPerSector)
         onProgress(90)
 
@@ -258,6 +260,37 @@ class Fat32Formatter(
         b.put(510, 0x55.toByte())
         b.put(511, 0xAA.toByte())
         return b.array()
+    }
+
+    /**
+     * Zeroes both FAT copies in large sequential bursts so every cluster entry
+     * starts free (0). Runs under the Formatting progress (6→88%). On a 28 GB
+     * drive the two FATs are ~56 MB, written here in one fast pass instead of at
+     * the end of the burn (which previously froze the progress UI).
+     */
+    private fun zeroFatRegion(
+        partitionStartLba: Long,
+        fatSizeSectors: Long,
+        bytesPerSector: Int,
+        onProgress: (Int) -> Unit
+    ) {
+        val burstSectors = (MAX_BURST_BYTES / bytesPerSector).coerceAtLeast(1)
+        val zero = ByteBuffer.allocate(burstSectors * bytesPerSector)
+        val totalSectors = fatSizeSectors * NUM_FATS
+        var done = 0L
+        for (fat in 0 until NUM_FATS) {
+            val fatStart = partitionStartLba + RESERVED_SECTORS + fat * fatSizeSectors
+            var sector = 0L
+            while (sector < fatSizeSectors) {
+                val n = minOf(burstSectors.toLong(), fatSizeSectors - sector).toInt()
+                zero.clear()
+                zero.limit(n * bytesPerSector)
+                blockDevice.write(fatStart + sector, zero)
+                sector += n
+                done += n
+                onProgress((6 + (done * 82 / totalSectors)).toInt().coerceIn(6, 88))
+            }
+        }
     }
 
     private fun writeFatHeads(
