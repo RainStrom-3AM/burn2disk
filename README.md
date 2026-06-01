@@ -7,6 +7,11 @@ Built with Jetpack Compose + Material 3, MVVM + Repository, and Hilt.
 - Min SDK 21 · Target/Compile SDK 34 · Kotlin
 - Dark-only theme · amber (`#E8A020`) on near-black (`#0D0D0D`)
 
+> ✅ **Known-good baseline: v1.0.7** (commit `612f45a`, 2026-06-01).
+> Confirmed working on real hardware — burn, format, and the fast write path
+> all verified on-device. This tag is a safe point to return to if a later
+> change regresses.
+
 ## How it works
 
 | Stage | Component | Notes |
