@@ -19,6 +19,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.activity.result.ActivityResultLauncher
 import com.burnto.disk.ui.navigation.Routes
 import com.burnto.disk.ui.screens.BurnProgressScreen
+import com.burnto.disk.ui.screens.BrowseUsbScreen
 import com.burnto.disk.ui.screens.DeviceSelectionScreen
 import com.burnto.disk.ui.screens.HomeScreen
 import com.burnto.disk.ui.screens.IsoInfoScreen
@@ -79,7 +80,7 @@ private fun AppNavHost(
                     onSelectIso = { navController.navigate(Routes.ISO_SOURCE) },
                     onDownloadIso = { navController.navigate(Routes.ISO_SOURCE) },
                     onFormatDisk = { vm.formatDisk() },
-                    onDiagnoseUsb = { vm.diagnoseUsb() },
+                    onBrowseUsb = { navController.navigate(Routes.BROWSE_USB) },
                     viewModel = vm
                 )
             }
@@ -136,6 +137,9 @@ private fun AppNavHost(
                     }
                 }
             )
+        }
+        composable(Routes.BROWSE_USB) {
+            BrowseUsbScreen(onClose = { navController.popBackStack() })
         }
     }
 }

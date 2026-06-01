@@ -9,4 +9,5 @@ object Routes {
     const val DEVICE_SELECTION = "device_selection"
     const val BURN_PROGRESS = "burn_progress"
     const val RESULT = "result"
+    const val BROWSE_USB = "browse_usb"
 }
