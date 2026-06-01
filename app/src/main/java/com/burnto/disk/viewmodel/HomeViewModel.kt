@@ -1,6 +1,8 @@
 package com.burnto.disk.viewmodel
 
 import android.net.Uri
+import android.content.Context
+import android.hardware.usb.UsbManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.burnto.disk.data.BurnSession
@@ -12,6 +14,8 @@ import com.burnto.disk.data.model.IsoInfo
 import com.burnto.disk.data.model.RecentIso
 import com.burnto.disk.data.model.UsbDeviceInfo
 import com.burnto.disk.data.usb.BurnEngine
+import com.burnto.disk.data.usb.Fat32Formatter
+import com.burnto.disk.data.usb.RawUsbBlockDevice
 import com.burnto.disk.data.usb.UsbDeviceManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -33,16 +37,18 @@ sealed class IsoUiState {
     data class Error(val message: String) : IsoUiState()
 }
 
-/** UI state for the standalone Format Disk flow. */
+/** UI state for the standalone one-tap Format Disk flow. */
 sealed class FormatUiState {
     data object Idle : FormatUiState()
-    data class InProgress(val progress: Int) : FormatUiState()
-    data class Done(val message: String) : FormatUiState()
+    data object NoUsb : FormatUiState()
+    data class Formatting(val progress: Int) : FormatUiState()
+    data object Success : FormatUiState()
     data class Error(val message: String) : FormatUiState()
 }
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
     private val isoRepository: IsoRepository,
     private val downloadManager: DownloadManager,
     private val recentIsoStore: RecentIsoStore,
@@ -163,27 +169,72 @@ class HomeViewModel @Inject constructor(
      * Standalone format of the connected USB drive (Home-screen "Format Disk").
      * Lets the user recover a broken drive after a failed burn without a PC.
      */
-    fun formatDisk(volumeLabel: String) {
-        val device = _connectedDevice.value ?: run {
-            _formatState.value = FormatUiState.Error("Connect a USB drive via OTG first")
-            return
-        }
-        viewModelScope.launch {
-            _formatState.value = FormatUiState.InProgress(0)
-            val result = burnEngine.formatDevice(
-                deviceId = device.deviceId,
-                volumeLabel = volumeLabel.ifBlank { "USB DISK" },
-                capacityHintBytes = device.capacityBytes
-            ) { pct -> _formatState.value = FormatUiState.InProgress(pct) }
-
-            _formatState.value = when (result) {
-                is BurnEngine.FormatResult.Success ->
-                    FormatUiState.Done("Format complete — drive is ready")
-                is BurnEngine.FormatResult.Failure ->
-                    FormatUiState.Error(result.message)
+    /**
+     * One-tap format of the connected USB drive. No confirmation dialog — the
+     * Home-screen button starts immediately. Bypasses libaums' filesystem mount
+     * (which fails on a drive with no partition table) and writes a fresh FAT32
+     * directly via the raw block device. Recovers a corrupted/unallocated drive
+     * (e.g. left broken by a failed burn) without needing a PC.
+     */
+    fun formatDisk() {
+        viewModelScope.launch(Dispatchers.IO) {
+            // 1. Find a USB device.
+            val devices = runCatching { usbDeviceManager.rawDevices() }.getOrDefault(emptyList())
+            if (devices.isEmpty()) {
+                _formatState.value = FormatUiState.NoUsb
+                return@launch
             }
-            // Refresh capacity so the UI reflects the freshly formatted drive.
-            refreshUsb()
+            val msd = devices.first()
+            val usbDevice = msd.usbDevice
+
+            // 2. Permission.
+            val granted = runCatching { usbDeviceManager.requestPermission(usbDevice) }.getOrDefault(false)
+            if (!granted) {
+                _formatState.value = FormatUiState.Error("USB permission denied")
+                return@launch
+            }
+
+            // 3. Open the RAW block device directly — do NOT call libaums
+            //    msd.init(), which tries to mount a filesystem that may not exist.
+            _formatState.value = FormatUiState.Formatting(0)
+            var raw: RawUsbBlockDevice? = null
+            try {
+                val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                raw = RawUsbBlockDevice.create(usbManager, usbDevice)
+                raw.init()
+
+                var capacity = raw.capacityBytes
+                if (capacity <= 0L) {
+                    // Corrupted/missing MBR: clear LBA 0 and re-init, which often
+                    // restores a sane READ CAPACITY result.
+                    capacity = raw.clearMbrAndReinit()
+                }
+                // Use the largest trustworthy value; the formatter falls back to a
+                // safe 28 GiB underestimate if this is still zero.
+                val totalBytes = maxOf(capacity, raw.blockDevice.blocks * raw.blockDevice.blockSize.toLong())
+
+                Fat32Formatter(raw.blockDevice).format(
+                    totalBytes = totalBytes,
+                    volumeLabel = "USB DISK"
+                ) { pct -> _formatState.value = FormatUiState.Formatting(pct) }
+
+                // 6. Re-init after format to confirm the drive is readable and to
+                //    refresh capacity for the device list.
+                raw.close()
+                raw = null
+                runCatching {
+                    val recheck = RawUsbBlockDevice.create(usbManager, usbDevice)
+                    recheck.init()
+                    recheck.close()
+                }
+
+                _formatState.value = FormatUiState.Success
+                refreshUsb()
+            } catch (e: Exception) {
+                _formatState.value = FormatUiState.Error(e.message ?: "Format failed")
+            } finally {
+                runCatching { raw?.close() }
+            }
         }
     }
 

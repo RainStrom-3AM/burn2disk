@@ -10,6 +10,7 @@ import me.jahnen.libaums.core.driver.BlockDeviceDriverFactory
 import me.jahnen.libaums.core.usb.UsbCommunication
 import me.jahnen.libaums.core.usb.UsbCommunicationFactory
 import java.io.IOException
+import java.nio.ByteBuffer
 
 /**
  * Builds and owns a *raw*, LBA-addressed [BlockDeviceDriver] for a USB mass
@@ -32,15 +33,47 @@ class RawUsbBlockDevice private constructor(
 
     /** Capacity in bytes, available after [init]. */
     val capacityBytes: Long
-        get() = blockDevice.blocks * blockDevice.blockSize
+        get() = blockDevice.blocks * blockDevice.blockSize.toLong()
 
     val blockSize: Int
         get() = blockDevice.blockSize
 
-    /** Initializes the SCSI device (issues READ CAPACITY, etc.). */
+    /**
+     * Initializes the SCSI device (issues READ CAPACITY, etc.). Retries a few
+     * times because a drive can transiently report zero blocks right after a
+     * heavy write burst or when its MBR is corrupt.
+     */
     @Throws(IOException::class)
     fun init() {
-        blockDevice.init()
+        var lastError: Exception? = null
+        repeat(3) { attempt ->
+            try {
+                blockDevice.init()
+                if (blockDevice.blocks > 0L) return
+            } catch (e: Exception) {
+                lastError = e
+            }
+            if (attempt < 2) Thread.sleep(150)
+        }
+        // If we still have zero blocks but no exception, fall through — callers
+        // (formatter) can attempt MBR-clear recovery. Only rethrow a hard error
+        // when init never succeeded at all.
+        if (blockDevice.blocks <= 0L && lastError != null) throw IOException("USB init failed", lastError)
+    }
+
+    /**
+     * Recovery for a corrupted/garbage MBR that makes the controller report a
+     * bogus (often zero) capacity: zero LBA 0, then re-init so READ CAPACITY is
+     * re-issued. Returns the (re-read) capacity in bytes. Best-effort.
+     */
+    fun clearMbrAndReinit(): Long {
+        runCatching {
+            val bs = blockDevice.blockSize.coerceAtLeast(512)
+            val zero = ByteBuffer.allocate(bs)
+            blockDevice.write(0, zero)
+        }
+        runCatching { blockDevice.init() }
+        return capacityBytes
     }
 
     fun close() {

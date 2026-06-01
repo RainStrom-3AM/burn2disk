@@ -78,6 +78,7 @@ private fun AppNavHost(
                 HomeScreen(
                     onSelectIso = { navController.navigate(Routes.ISO_SOURCE) },
                     onDownloadIso = { navController.navigate(Routes.ISO_SOURCE) },
+                    onFormatDisk = { vm.formatDisk() },
                     viewModel = vm
                 )
             }

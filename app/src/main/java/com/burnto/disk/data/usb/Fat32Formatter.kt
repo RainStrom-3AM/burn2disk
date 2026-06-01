@@ -85,14 +85,22 @@ class Fat32Formatter(
     ): FatGeometry {
         require(blockSize >= 512) { "Unsupported block size $blockSize" }
         val bytesPerSector = blockSize
-        val deviceSectors = totalBytes / bytesPerSector
+
+        // A corrupted/missing MBR can make the controller briefly report zero
+        // capacity. Rather than abort, fall back to a conservative 28 GiB (a safe
+        // underestimate for a 32 GB drive) so the user can still recover the
+        // drive. The resulting partition just won't span the very end of an
+        // oversized stick, which is harmless and re-formattable later.
+        val FALLBACK_BYTES = 28L * 1024 * 1024 * 1024
+        val effectiveBytes = if (totalBytes <= 0L) FALLBACK_BYTES else totalBytes
+        val deviceSectors = effectiveBytes / bytesPerSector
         require(deviceSectors > 0) { "Device reports zero sectors" }
 
         val partitionStartLba = ALIGNMENT_BYTES / bytesPerSector // = 2048 for 512-byte sectors
         require(deviceSectors > partitionStartLba + 65536) { "Device too small for FAT32" }
         val partitionSectors = deviceSectors - partitionStartLba
 
-        val sectorsPerCluster = chooseSectorsPerCluster(totalBytes, bytesPerSector)
+        val sectorsPerCluster = chooseSectorsPerCluster(effectiveBytes, bytesPerSector)
         val fatSizeSectors = computeFatSize(partitionSectors, sectorsPerCluster, bytesPerSector)
         val dataSectors = partitionSectors - RESERVED_SECTORS - (NUM_FATS * fatSizeSectors)
         val clusterCount = dataSectors / sectorsPerCluster
