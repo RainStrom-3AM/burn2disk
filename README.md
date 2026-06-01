@@ -7,10 +7,14 @@ Built with Jetpack Compose + Material 3, MVVM + Repository, and Hilt.
 - Min SDK 21 · Target/Compile SDK 34 · Kotlin
 - Dark-only theme · amber (`#E8A020`) on near-black (`#0D0D0D`)
 
-> ✅ **Known-good baseline: v1.0.7** (commit `612f45a`, 2026-06-01).
-> Confirmed working on real hardware — burn, format, and the fast write path
-> all verified on-device. This tag is a safe point to return to if a later
-> change regresses.
+> ✅ **Known-good baseline: v1.1.0** (commit `2c9c66b`, 2026-06-01).
+> Confirmed working end-to-end on real hardware — burn, format, the fast write
+> path, and (critically) files persisting on the drive after burn are all
+> verified on-device. v1.1.0 fixed the post-burn re-init that was re-formatting
+> the drive and wiping the just-written files. This tag is a safe point to
+> return to if a later change regresses.
+>
+> Earlier verified baseline: v1.0.7 (commit `612f45a`).
 
 ## How it works
 
