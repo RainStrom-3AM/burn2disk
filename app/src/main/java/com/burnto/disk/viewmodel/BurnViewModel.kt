@@ -75,6 +75,7 @@ class BurnViewModel @Inject constructor(
             putExtra(BurnService.EXTRA_ISO_PATH, isoInfo.path)
             putExtra(BurnService.EXTRA_DEVICE_ID, device.deviceId)
             putExtra(BurnService.EXTRA_ISO_NAME, isoInfo.fileName)
+            putExtra(BurnService.EXTRA_CAPACITY, device.capacityBytes)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(intent)
@@ -88,6 +89,15 @@ class BurnViewModel @Inject constructor(
             action = BurnService.ACTION_CANCEL
         }
         context.startService(intent)
+    }
+
+    /** Re-reads the written files from the USB and verifies them against the ISO. */
+    fun verifyBurn() {
+        val isoInfo = session.iso.value ?: return
+        val device = session.device.value ?: return
+        viewModelScope.launch {
+            burnEngine.verify(java.io.File(isoInfo.path), device.deviceId, device.capacityBytes)
+        }
     }
 
     fun resetBurn() {

@@ -24,16 +24,17 @@ class IsoDetector {
 
     private companion object {
         const val FAT32_FILE_LIMIT = 0xFFFFFFFFL // 4 GiB - 1 byte
+        const val ASSUMED_X64_MIN_BYTES = 200L * 1024 * 1024 // 200 MB
     }
 
-    fun detect(entries: List<IsoEntry>): Detection {
+    fun detect(entries: List<IsoEntry>, totalSizeBytes: Long = 0L): Detection {
         // Normalise paths to lowercase, forward-slash for matching.
         val lowerPaths = entries.associateBy { it.fullPath.lowercase().replace('\\', '/') }
         val pathSet = lowerPaths.keys
 
         val osType = detectOs(pathSet)
         val bootType = detectBoot(pathSet)
-        val arch = detectArch(pathSet)
+        val arch = detectArch(pathSet, totalSizeBytes)
 
         val hasLargeWim = entries.any {
             val n = it.name.lowercase()
@@ -74,14 +75,45 @@ class IsoDetector {
         }
     }
 
-    private fun detectArch(paths: Set<String>): Architecture {
-        // Use UEFI bootloader filenames as the strongest architecture signal.
-        return when {
-            paths.any { it.endsWith("bootaa64.efi") || it.endsWith("/grubaa64.efi") } -> Architecture.ARM
-            paths.any { it.endsWith("bootx64.efi") || it.endsWith("/grubx64.efi") } -> Architecture.X64
-            paths.any { it.endsWith("bootia32.efi") || it.endsWith("/grubia32.efi") } -> Architecture.X86
-            else -> Architecture.UNKNOWN
+    /**
+     * Detects target architecture from, in order of confidence:
+     *  1. UEFI boot binary filenames anywhere in the tree
+     *     (bootx64/grubx64/...→x64, bootia32→x86, bootaa64→ARM64, bootarm→ARM).
+     *  2. The `arch/boot/<name>` subdirectory used by Arch and others
+     *     (x86_64→x64, i686→x86, aarch64→ARM64).
+     *  3. Any path token containing a known arch keyword (amd64, arm64, ...).
+     *  4. Fallback: if still unknown and the image is larger than 200 MB,
+     *     assume x64 (the overwhelmingly common desktop case) rather than
+     *     reporting "Unknown".
+     */
+    private fun detectArch(paths: Set<String>, totalSizeBytes: Long): Architecture {
+        // 1. EFI boot binary filenames (strongest signal).
+        fun endsWithEfi(vararg names: String) =
+            paths.any { p -> names.any { p.endsWith(it) } }
+
+        when {
+            endsWithEfi("bootaa64.efi", "grubaa64.efi", "/aa64.efi") -> return Architecture.ARM64
+            endsWithEfi("bootarm.efi", "grubarm.efi") -> return Architecture.ARM
+            endsWithEfi("bootx64.efi", "grubx64.efi", "mmx64.efi", "shimx64.efi") -> return Architecture.X64
+            endsWithEfi("bootia32.efi", "grubia32.efi", "mmia32.efi") -> return Architecture.X86
         }
+
+        // 2. arch/boot/<name> subdirectory (Arch-style) and generic path tokens.
+        val joined = paths.joinToString("\n")
+        when {
+            joined.contains("/x86_64/") || joined.contains("arch/boot/x86_64") ||
+                joined.contains("amd64") || joined.contains("x86_64") || joined.contains("/x64/") ->
+                return Architecture.X64
+            joined.contains("aarch64") || joined.contains("arm64") || joined.contains("/aa64/") ->
+                return Architecture.ARM64
+            joined.contains("/i686/") || joined.contains("/i386/") || joined.contains("arch/boot/i686") ->
+                return Architecture.X86
+        }
+
+        // 3. Fallback: large images are almost certainly x64 desktop installers.
+        if (totalSizeBytes > ASSUMED_X64_MIN_BYTES) return Architecture.X64_ASSUMED
+
+        return Architecture.UNKNOWN
     }
 
     /**
@@ -98,9 +130,11 @@ class IsoDetector {
             else -> OsType.GENERIC
         }
         val arch = when {
+            n.contains("aarch64") || n.contains("arm64") -> Architecture.ARM64
             n.contains("amd64") || n.contains("x86_64") || n.contains("x64") -> Architecture.X64
-            n.contains("aarch64") || n.contains("arm64") || n.contains("arm") -> Architecture.ARM
+            n.contains("armhf") || n.contains("armv7") || n.contains("-arm") -> Architecture.ARM
             n.contains("i386") || n.contains("i686") || n.contains("x86") -> Architecture.X86
+            file.length() > ASSUMED_X64_MIN_BYTES -> Architecture.X64_ASSUMED
             else -> Architecture.UNKNOWN
         }
         return Detection(os, BootType.UNKNOWN, arch, hasLargeWim = false)

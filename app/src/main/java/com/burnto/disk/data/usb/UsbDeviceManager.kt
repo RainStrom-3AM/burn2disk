@@ -38,13 +38,35 @@ class UsbDeviceManager @Inject constructor(
     fun listDevices(): List<UsbDeviceInfo> {
         return UsbMassStorageDevice.getMassStorageDevices(context).map { msd ->
             val dev = msd.usbDevice
-            val capacity = runCatching {
-                msd.init()
-                val partition = msd.partitions.firstOrNull()
-                val fs = partition?.fileSystem
-                Pair(fs?.capacity ?: 0L, fs?.let { describeFs(it.type) } ?: "Unknown")
-            }.getOrDefault(Pair(0L, "Unknown")).also {
+            val hasPerm = usbManager.hasPermission(dev)
+
+            var capacityBytes = 0L
+            var fsLabel = "Unknown"
+            if (hasPerm) {
+                runCatching {
+                    msd.init()
+                    val partition = msd.partitions.firstOrNull()
+                    val fs = partition?.fileSystem
+                    if (fs != null) {
+                        capacityBytes = fs.capacity
+                        fsLabel = describeFs(fs.type)
+                    }
+                }
                 runCatching { msd.close() }
+            }
+
+            // If the filesystem couldn't report a capacity (unformatted, or an
+            // unsupported fs such as exFAT/NTFS), fall back to the raw SCSI
+            // READ CAPACITY so we still have a trustworthy device size. This is
+            // the value the burn pre-flight uses as its capacity hint.
+            if (capacityBytes <= 0L && hasPerm) {
+                capacityBytes = runCatching {
+                    val raw = RawUsbBlockDevice.create(usbManager, dev)
+                    raw.init()
+                    val bytes = raw.capacityBytes
+                    raw.close()
+                    bytes
+                }.getOrDefault(0L)
             }
 
             UsbDeviceInfo(
@@ -53,9 +75,9 @@ class UsbDeviceManager @Inject constructor(
                 productName = productNameOf(dev),
                 vendorId = dev.vendorId,
                 productId = dev.productId,
-                capacityBytes = capacity.first,
-                filesystem = capacity.second,
-                hasPermission = usbManager.hasPermission(dev)
+                capacityBytes = capacityBytes,
+                filesystem = fsLabel,
+                hasPermission = hasPerm
             )
         }
     }

@@ -42,12 +42,27 @@ comply with the GPLv3.
 
 ## Build
 
+Debug:
 ```bash
 ./gradlew assembleDebug
 ```
 
-Output: `app/build/outputs/apk/debug/app-debug.apk`. Verified building against
-Android SDK 34 / build-tools 34.0.0 with JDK for AGP 8.5.
+Signed release:
+```bash
+./gradlew assembleRelease
+```
+
+Outputs:
+- `app/build/outputs/apk/debug/app-debug.apk`
+- `app/build/outputs/apk/release/app-release.apk` (signed with the bundled
+  `app/burn2disk-release.keystore`)
+
+Verified building against Android SDK 34 / build-tools 34.0.0 with JDK for AGP 8.5.
+The latest signed APK is attached to the GitHub Release and mirrored in `release/`.
+
+> The bundled keystore is a self-signed, non-secret key for non-Play distribution
+> (GitHub Releases). For a Play submission, replace it with a private upload key
+> kept out of source control.
 
 ## Important caveats
 

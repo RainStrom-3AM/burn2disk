@@ -81,7 +81,7 @@ fun ResultScreen(
             verticalArrangement = Arrangement.Center
         ) {
             when (val s = state) {
-                is BurnState.Success -> SuccessContent(s, scale, onDone, onVerify = { /* verify */ })
+                is BurnState.Success -> SuccessContent(s, scale, onDone, onVerify = { viewModel.verifyBurn() })
                 is BurnState.Failed -> FailureContent(
                     error = s.error,
                     suggestion = s.suggestion,
@@ -98,6 +98,7 @@ fun ResultScreen(
                         clipboard.setText(AnnotatedString(report))
                     }
                 )
+                is BurnState.Verifying -> VerifyingContent(s.progress)
                 else -> {
                     Text("Finishing...", color = TextSecondary)
                 }
@@ -156,6 +157,20 @@ private fun SuccessContent(
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber),
         border = androidx.compose.foundation.BorderStroke(1.5.dp, Amber)
     ) { Text("VERIFY", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+}
+
+@Composable
+private fun VerifyingContent(progress: Int) {
+    Icon(
+        imageVector = Icons.Filled.Check,
+        contentDescription = null,
+        tint = Amber,
+        modifier = Modifier.size(72.dp)
+    )
+    Spacer(Modifier.height(20.dp))
+    Text("Verifying...", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+    Spacer(Modifier.height(8.dp))
+    Text("$progress%", style = MonoText.medium, color = Amber)
 }
 
 @Composable

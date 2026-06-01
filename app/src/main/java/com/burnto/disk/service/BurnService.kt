@@ -50,6 +50,7 @@ class BurnService : Service() {
         const val EXTRA_ISO_PATH = "iso_path"
         const val EXTRA_ISO_NAME = "iso_name"
         const val EXTRA_DEVICE_ID = "device_id"
+        const val EXTRA_CAPACITY = "capacity_bytes"
         private const val NOTIFICATION_ID = 1001
     }
 
@@ -60,9 +61,10 @@ class BurnService : Service() {
             ACTION_START -> {
                 val path = intent.getStringExtra(EXTRA_ISO_PATH)
                 val deviceId = intent.getIntExtra(EXTRA_DEVICE_ID, -1)
+                val capacity = intent.getLongExtra(EXTRA_CAPACITY, 0L)
                 isoName = intent.getStringExtra(EXTRA_ISO_NAME) ?: "ISO"
                 if (path != null && deviceId != -1) {
-                    startBurn(File(path), deviceId)
+                    startBurn(File(path), deviceId, capacity)
                 } else {
                     stopSelf()
                 }
@@ -74,7 +76,7 @@ class BurnService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startBurn(isoFile: File, deviceId: Int) {
+    private fun startBurn(isoFile: File, deviceId: Int, capacityBytes: Long) {
         startForegroundWithNotification(buildNotification("Preparing...", 0, indeterminate = true))
         acquireWakeLock()
 
@@ -84,7 +86,7 @@ class BurnService : Service() {
             .launchIn(serviceScope)
 
         burnJob = serviceScope.launch {
-            burnEngine.burn(isoFile, deviceId)
+            burnEngine.burn(isoFile, deviceId, capacityBytes)
             // Keep the service alive briefly so the terminal state is observed,
             // then tear down.
             stopForegroundCompat()

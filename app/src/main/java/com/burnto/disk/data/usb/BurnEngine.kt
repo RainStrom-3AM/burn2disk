@@ -72,6 +72,94 @@ class BurnEngine @Inject constructor(
         _state.value = BurnState.Idle
     }
 
+    /**
+     * Re-reads the files written to the USB and verifies them against the source
+     * ISO by comparing per-file SHA-1 digests. Emits [BurnState.Verifying] with
+     * 0-100 progress and finishes on [BurnState.Success] (reusing the last burn's
+     * duration is not needed here) or [BurnState.Failed] on the first mismatch.
+     *
+     * Large (split) WIM files are skipped, since their on-USB representation is a
+     * set of .swm parts, not a byte-identical copy.
+     */
+    suspend fun verify(isoFile: File, deviceId: Int, capacityHintBytes: Long = 0L) {
+        var raw: RawUsbBlockDevice? = null
+        try {
+            val msd = usbDeviceManager.findRawDeviceById(deviceId)
+                ?: throw BurnException("USB device not found", "Reconnect your USB drive and try again")
+            val usbDevice = msd.usbDevice
+            if (!usbDeviceManager.requestPermission(usbDevice)) {
+                throw BurnException("USB permission denied", "Grant USB access and try again")
+            }
+            _state.value = BurnState.Verifying(0)
+            emitLog("Verifying written data...")
+
+            raw = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
+            val partitionStartLba = (1L shl 20) / raw.blockSize
+            val partitionDevice = me.jahnen.libaums.core.driver.ByteBlockDevice(
+                raw.blockDevice, partitionStartLba.toInt()
+            )
+            val fs = Fat32FileSystem.read(partitionDevice)
+                ?: throw BurnException("Could not read USB filesystem", "Try a different USB drive")
+            val root = fs.rootDirectory
+
+            val entries = RandomAccessFile(isoFile, "r").use { r ->
+                IsoParser(r).let { it.open(); it.listAllEntries() }
+            }
+            val files = entries.filter {
+                !it.isDirectory &&
+                    !(it.name.lowercase() in SPLITTABLE && it.sizeBytes > FAT32_FILE_LIMIT)
+            }
+
+            val rawDevice = raw
+            val raf = RandomAccessFile(isoFile, "r")
+            var mismatches = 0
+            raf.use {
+                var index = 0
+                for (entry in files) {
+                    coroutineContext.ensureActive()
+                    index++
+                    val usbFile = runCatching { root.search(entry.fullPath) }.getOrNull()
+                    if (usbFile == null || usbFile.isDirectory) {
+                        emitLog("MISSING: ${entry.fullPath}", isFileName = true)
+                        mismatches++
+                    } else if (usbFile.length != entry.sizeBytes) {
+                        emitLog("SIZE MISMATCH: ${entry.fullPath}", isFileName = true)
+                        mismatches++
+                    } else {
+                        val isoHash = hashIsoExtent(raf, entry.extentLba, entry.sizeBytes)
+                        val usbHash = hashUsbFile(usbFile, entry.sizeBytes)
+                        if (isoHash != usbHash) {
+                            emitLog("HASH MISMATCH: ${entry.fullPath}", isFileName = true)
+                            mismatches++
+                        }
+                    }
+                    _state.value = BurnState.Verifying(((index * 100) / files.size.coerceAtLeast(1)))
+                }
+            }
+
+            rawDevice.close()
+            raw = null
+
+            if (mismatches == 0) {
+                emitLog("Verification passed: ${files.size} files OK")
+                _state.value = BurnState.Success(files.sumOf { it.sizeBytes }, 0)
+            } else {
+                _state.value = BurnState.Failed(
+                    "$mismatches file(s) failed verification",
+                    "Re-burn the ISO to this drive"
+                )
+            }
+        } catch (e: BurnException) {
+            emitLog("ERROR: ${e.message}")
+            _state.value = BurnState.Failed(e.message ?: "Verify failed", e.suggestion)
+        } catch (e: Exception) {
+            emitLog("ERROR: ${e.message}")
+            _state.value = BurnState.Failed(e.message ?: "Verify failed", "Reconnect your USB drive and try again")
+        } finally {
+            raw?.close()
+        }
+    }
+
     private fun emitLog(message: String, isFileName: Boolean = false) {
         _log.tryEmit(BurnLogLine(message, isFileName))
     }
@@ -80,8 +168,13 @@ class BurnEngine @Inject constructor(
      * Executes the full burn. Suspends until completion or failure. Cancellation
      * of the calling coroutine aborts the burn (leaving the USB in an
      * intermediate state, as warned in the UI).
+     *
+     * @param capacityHintBytes the capacity already read reliably during device
+     *   enumeration. Used as the authoritative value for the pre-flight size
+     *   check, since a freshly re-initialised raw SCSI device can briefly report
+     *   an unreliable (or zero) capacity.
      */
-    suspend fun burn(isoFile: File, deviceId: Int) {
+    suspend fun burn(isoFile: File, deviceId: Int, capacityHintBytes: Long = 0L) {
         val startMs = System.currentTimeMillis()
         var raw: RawUsbBlockDevice? = null
         try {
@@ -98,12 +191,19 @@ class BurnEngine @Inject constructor(
             // --- Step 2: raw block device ---
             emitLog("Opening USB device...")
             raw = RawUsbBlockDevice.create(usbManager, usbDevice).also { it.init() }
-            val capacity = raw.capacityBytes
+            val rawCapacity = raw.capacityBytes
+
+            // Trust whichever positive value we have; prefer the larger of the
+            // raw read and the capacity hint from enumeration. This avoids a
+            // false "ISO larger than USB capacity" when the raw read returns 0.
+            val capacity = maxOf(rawCapacity, capacityHintBytes)
             emitLog("Capacity: ${formatBytes(capacity)} · block ${raw.blockSize} B")
 
-            // Pre-flight size check.
+            // Pre-flight size check: only enforce when we actually have a
+            // trustworthy positive capacity. A zero/unknown capacity must never
+            // be treated as "too small".
             val isoSize = isoFile.length()
-            if (isoSize > capacity) {
+            if (capacity > 0L && isoSize > capacity) {
                 throw BurnException(
                     "ISO larger than USB capacity",
                     "Use a larger USB drive"
@@ -111,10 +211,13 @@ class BurnEngine @Inject constructor(
             }
 
             // --- Step 3: format FAT32 ---
+            // Format against the actual raw capacity when available, otherwise
+            // fall back to the hint so geometry is still computed sanely.
+            val formatCapacity = if (rawCapacity > 0L) rawCapacity else capacity
             val label = isoFile.nameWithoutExtension
             _state.value = BurnState.Formatting(0)
             emitLog("Formatting FAT32...")
-            Fat32Formatter(raw.blockDevice).format(capacity, label) { pct ->
+            Fat32Formatter(raw.blockDevice).format(formatCapacity, label) { pct ->
                 _state.value = BurnState.Formatting(pct)
             }
             emitLog("Format complete")
@@ -397,6 +500,42 @@ class BurnEngine @Inject constructor(
             target.flush()
             src.length()
         }
+
+    /** SHA-1 of an ISO extent (used for verify). */
+    private fun hashIsoExtent(raf: RandomAccessFile, extentLba: Long, length: Long): String {
+        val md = java.security.MessageDigest.getInstance("SHA-1")
+        raf.seek(extentLba * ISO_SECTOR)
+        val buffer = ByteArray(COPY_BUFFER)
+        var remaining = length
+        while (remaining > 0) {
+            val toRead = minOf(COPY_BUFFER.toLong(), remaining).toInt()
+            raf.readFully(buffer, 0, toRead)
+            md.update(buffer, 0, toRead)
+            remaining -= toRead
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** SHA-1 of a file read back from the USB (used for verify). */
+    private fun hashUsbFile(file: UsbFile, length: Long): String {
+        val md = java.security.MessageDigest.getInstance("SHA-1")
+        val bb = ByteBuffer.allocate(COPY_BUFFER)
+        val tmp = ByteArray(COPY_BUFFER)
+        var offset = 0L
+        var remaining = length
+        while (remaining > 0) {
+            val toRead = minOf(COPY_BUFFER.toLong(), remaining).toInt()
+            bb.clear()
+            bb.limit(toRead)
+            file.read(offset, bb)
+            bb.flip()
+            bb.get(tmp, 0, toRead)
+            md.update(tmp, 0, toRead)
+            offset += toRead
+            remaining -= toRead
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
 
     private fun formatBytes(bytes: Long): String {
         if (bytes < 1024) return "$bytes B"

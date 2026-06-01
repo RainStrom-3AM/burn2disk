@@ -70,7 +70,7 @@ fun IsoInfoScreen(
         containerColor = NearBlack,
         topBar = {
             TopAppBar(
-                title = { Text("ISO details") },
+                title = { Text("ISO Info") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Amber)

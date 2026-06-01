@@ -22,9 +22,22 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            // Self-signed keystore bundled for non-Play distribution (GitHub
+            // Releases). This is NOT a Play-grade secret; for a Play submission,
+            // replace with a private upload key kept out of source control.
+            storeFile = file("burn2disk-release.keystore")
+            storePassword = "burn2disk"
+            keyAlias = "burn2disk"
+            keyPassword = "burn2disk"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

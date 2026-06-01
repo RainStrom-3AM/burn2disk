@@ -21,7 +21,9 @@ enum class BootType(val label: String) {
 enum class Architecture(val label: String) {
     X64("x64"),
     X86("x86"),
+    ARM64("ARM64"),
     ARM("ARM"),
+    X64_ASSUMED("x64 (assumed)"),
     UNKNOWN("Unknown")
 }
 
