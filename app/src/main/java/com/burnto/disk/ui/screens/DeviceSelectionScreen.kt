@@ -97,10 +97,16 @@ fun DeviceSelectionScreen(
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
-                sdCardManager.persistUri(uri) { info ->
-                    viewModel.selectSdCard(info)
-                    sheetTarget = BurnTarget.SdCard(info)
-                }
+                val info = sdCardManager.persistUri(uri)
+                // Merge the persisted URI with the detected info (capacity, name).
+                val merged = sdCard?.copy(
+                    uri = info.uri,
+                    displayName = info.displayName,
+                    freeBytes = info.freeBytes,
+                    totalBytes = info.totalBytes
+                ) ?: info
+                viewModel.selectSdCard(merged)
+                sheetTarget = BurnTarget.SdCard(merged)
             }
         }
     }
@@ -181,13 +187,14 @@ fun DeviceSelectionScreen(
                             info = sdCard!!,
                             selected = selected is BurnTarget.SdCard,
                             onClick = {
-                                // If we already have SAF permission, proceed.
-                                val persisted = sdCardManager.loadPersistedUri()
-                                if (persisted != null && persisted == sdCard!!.uri) {
-                                    viewModel.selectSdCard(sdCard!!)
-                                    sheetTarget = BurnTarget.SdCard(sdCard!!)
+                                val persistedUri = sdCardManager.loadPersistedUri()
+                                if (persistedUri != null) {
+                                    // We already have SAF permission — use the persisted URI.
+                                    val info = sdCard!!.copy(uri = persistedUri)
+                                    viewModel.selectSdCard(info)
+                                    sheetTarget = BurnTarget.SdCard(info)
                                 } else {
-                                    // Need SAF permission.
+                                    // No SAF permission yet — launch the picker.
                                     sdCardLauncher.launch(sdCardManager.requestAccessIntent())
                                 }
                             }
@@ -292,11 +299,13 @@ private fun SdCardCard(
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary
                 )
-                Text(
-                    "Filesystem: ${info.filesystem}",
-                    style = MonoText.small,
-                    color = TextSecondary
-                )
+                if (info.filesystem.isNotBlank()) {
+                    Text(
+                        "Filesystem: ${info.filesystem}",
+                        style = MonoText.small,
+                        color = TextSecondary
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(

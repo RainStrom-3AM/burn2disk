@@ -4,8 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import android.os.StatFs
+import android.os.storage.StorageManager
+import android.os.storage.StorageVolume
 import androidx.documentfile.provider.DocumentFile
 import com.burnto.disk.data.model.SdCardInfo
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -29,45 +32,121 @@ class SdCardManager @Inject constructor(
     companion object {
         private const val PREFS_NAME = "sd_card_prefs"
         private const val KEY_SD_URI = "sd_card_uri"
-        private const val REQUEST_CODE = 9001
     }
 
     private val prefs: SharedPreferences by lazy {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
-    /** Returns a [SdCardInfo] for the physically inserted SD card, or null. */
+    /**
+     * Detects a physically inserted SD card.
+     *
+     * On API 24+ uses [StorageManager] which properly identifies removable
+     * storage regardless of filesystem (FAT16, FAT32, exFAT, NTFS, ext4).
+     * On older APIs falls back to [getExternalFilesDirs].
+     *
+     * The returned [SdCardInfo] has [uri] = [Uri.EMPTY] because the real
+     * write URI always comes from the SAF picker and is persisted separately.
+     */
     fun detectSdCard(): SdCardInfo? {
-        // getExternalFilesDirs returns [internal, external1, external2, ...]
+        // ---- API 24+: StorageManager gives proper removable detection ----
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val storageManager = context.getSystemService(Context.STORAGE_SERVICE) as? StorageManager
+            if (storageManager != null) {
+                try {
+                    for (volume in storageManager.storageVolumes) {
+                        if (volume.isRemovable && !volume.isEmulated) {
+                            val desc = volume.getDescription(context) ?: "SD Card"
+                            val (total, free) = readVolumeStats(volume, storageManager)
+                            return SdCardInfo(
+                                uri = Uri.EMPTY,
+                                displayName = desc,
+                                freeBytes = free,
+                                totalBytes = total,
+                                filesystem = ""
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    // StorageManager can throw on some devices — fall through.
+                }
+            }
+        }
+
+        // ---- Fallback 1: getExternalFilesDirs (API < 24, or StorageManager failed) ----
         val dirs = context.getExternalFilesDirs(null)
         for (i in 1 until dirs.size) {
             val dir = dirs.getOrNull(i) ?: continue
-            if (!dir.exists() || !dir.canWrite()) continue
+            if (!dir.exists()) continue
             val path = dir.absolutePath
             val rootPath = path.substringBefore("/Android/data")
             if (rootPath.isBlank()) continue
             val root = File(rootPath)
-            if (!root.exists() || !root.canRead()) continue
-            val stat = StatFs(rootPath)
-            val total = stat.totalBytes
-            val free = stat.availableBytes
-            // Try to read filesystem type from mount info (best-effort).
-            val fs = runCatching {
-                java.io.BufferedReader(java.io.FileReader("/proc/mounts")).use { reader ->
-                    reader.lineSequence().find { it.contains(rootPath) }
-                        ?.split(" ")?.getOrNull(2)
-                        ?: "FAT32"
-                }
-            }.getOrDefault("FAT32")
+            if (!root.exists()) continue
+            val stat = runCatching { StatFs(rootPath) }.getOrNull()
             return SdCardInfo(
-                uri = Uri.fromFile(root),
+                uri = Uri.EMPTY,
                 displayName = "SD Card",
-                freeBytes = free,
-                totalBytes = total,
-                filesystem = fs.uppercase()
+                freeBytes = stat?.availableBytes ?: 0L,
+                totalBytes = stat?.totalBytes ?: 0L,
+                filesystem = ""
             )
         }
+
+        // ---- Fallback 2: check Environment.getExternalStorageState for removable ----
+        if (Environment.getExternalStorageState() == Environment.MEDIA_MOUNTED) {
+            val extDir = Environment.getExternalStorageDirectory()
+            if (extDir != null && extDir.exists()) {
+                val stat = runCatching { StatFs(extDir.absolutePath) }.getOrNull()
+                if (stat != null) {
+                    return SdCardInfo(
+                        uri = Uri.EMPTY,
+                        displayName = "External Storage",
+                        freeBytes = stat.availableBytes,
+                        totalBytes = stat.totalBytes,
+                        filesystem = ""
+                    )
+                }
+            }
+        }
+
         return null
+    }
+
+    private fun readVolumeStats(volume: StorageVolume, storageManager: StorageManager): Pair<Long, Long> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                // StorageStatsManager for accurate per-volume stats.
+                val statsManager = context.getSystemService(Context.STORAGE_STATS_SERVICE)
+                    as? android.app.usage.StorageStatsManager
+                if (statsManager != null) {
+                    val uuid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        volume.storageUuid
+                    } else {
+                        val getUuid = StorageVolume::class.java.getMethod("getUuid")
+                        getUuid.invoke(volume) as? java.util.UUID
+                    }
+                    if (uuid != null) {
+                        val total = statsManager.getTotalBytes(uuid)
+                        val free = statsManager.getFreeBytes(uuid)
+                        return total to free
+                    }
+                }
+            } catch (e: Exception) { /* fall through */ }
+            0L to 0L
+        } else {
+            // Pre-O: try to get path via reflection and use StatFs.
+            val path = try {
+                val getPath = StorageVolume::class.java.getMethod("getPath")
+                getPath.invoke(volume) as? String
+            } catch (e: Exception) { null }
+            if (path != null) {
+                val stat = runCatching { StatFs(path) }.getOrNull()
+                (stat?.totalBytes ?: 0L) to (stat?.availableBytes ?: 0L)
+            } else {
+                0L to 0L
+            }
+        }
     }
 
     /** Launches the SAF document-tree picker so the user can grant write access. */
@@ -78,33 +157,42 @@ class SdCardManager @Inject constructor(
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
         }
 
-    /** Persists a granted SAF URI and calls [onPersisted] with the [SdCardInfo]. */
-    fun persistUri(uri: Uri, onPersisted: (SdCardInfo) -> Unit = {}) {
+    /**
+     * Persists a granted SAF URI and returns an [SdCardInfo] backed by that URI.
+     * The display name and capacity come from the tree document itself.
+     */
+    fun persistUri(uri: Uri): SdCardInfo {
         context.contentResolver.takePersistableUriPermission(
             uri,
             Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         )
         prefs.edit().putString(KEY_SD_URI, uri.toString()).apply()
-        // Build info from the tree document.
-        val doc = DocumentFile.fromTreeUri(context, uri) ?: return
-        val stat = runCatching {
-            val statFs = StatFs(doc.uri.path ?: return)
-            statFs.availableBytes to statFs.totalBytes
+
+        val doc = DocumentFile.fromTreeUri(context, uri)
+        val displayName = doc?.name ?: "SD Card"
+        val (free, total) = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && doc?.uri != null) {
+                val path = doc.uri.path
+                if (path != null) {
+                    val stat = StatFs(path)
+                    stat.availableBytes to stat.totalBytes
+                } else 0L to 0L
+            } else 0L to 0L
         }.getOrDefault(0L to 0L)
-        val info = SdCardInfo(
+
+        return SdCardInfo(
             uri = uri,
-            displayName = doc.name ?: "SD Card",
-            freeBytes = stat.first,
-            totalBytes = stat.second,
-            filesystem = "exFAT"
+            displayName = displayName,
+            freeBytes = free,
+            totalBytes = total,
+            filesystem = ""
         )
-        onPersisted(info)
     }
 
     /** Loads a previously persisted SD card URI, returning null if none. */
     fun loadPersistedUri(): Uri? {
         val str = prefs.getString(KEY_SD_URI, null) ?: return null
-        return Uri.parse(str)
+        return runCatching { Uri.parse(str) }.getOrNull()
     }
 
     /** Clears the persisted SD card URI (e.g. after user revokes access). */

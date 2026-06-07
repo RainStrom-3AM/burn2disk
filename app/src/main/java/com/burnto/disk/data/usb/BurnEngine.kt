@@ -439,10 +439,20 @@ class BurnEngine @Inject constructor(
             }
 
             // --- Step 3: format FAT32 ---
-            // Format against the actual raw capacity when available, otherwise
-            // fall back to the hint so geometry is still computed sanely.
             val formatCapacity = if (rawCapacity > 0L) rawCapacity else capacity
             val label = isoFile.nameWithoutExtension
+
+            _state.value = BurnState.Formatting(0)
+            emitLog("Formatting FAT32...")
+            val geometry = stage(
+                name = "USB format",
+                suggestion = "USB drive may be write-protected, damaged, or too small. Try a different drive."
+            ) {
+                Fat32Formatter(device.blockDevice).format(formatCapacity, label) { pct ->
+                    _state.value = BurnState.Formatting(pct)
+                }
+            }
+            emitLog("Format complete")
 
             // Chunk size from available heap — no benchmark. The real bottleneck
             // is the number of SCSI commands (fixed ~ms overhead each), so bigger
@@ -450,13 +460,6 @@ class BurnEngine @Inject constructor(
             val optimalChunk = (Runtime.getRuntime().maxMemory() / 8)
                 .toInt().coerceIn(2 * 1024 * 1024, 8 * 1024 * 1024)
             emitLog("Write chunk size: ${optimalChunk / 1024 / 1024}MB")
-
-            _state.value = BurnState.Formatting(0)
-            emitLog("Formatting FAT32...")
-            val geometry = Fat32Formatter(device.blockDevice).format(formatCapacity, label) { pct ->
-                _state.value = BurnState.Formatting(pct)
-            }
-            emitLog("Format complete")
 
             // Immediately leave the Formatting state so the UI does not appear
             // stuck at "Formatting FAT32... 100%". Show a parsing phase while the
@@ -489,10 +492,15 @@ class BurnEngine @Inject constructor(
 
             // --- Step 4: parse ISO ---
             emitLog("Parsing ISO filesystem...")
-            val entries = RandomAccessFile(isoFile, "r").use { rafForList ->
-                IsoParser(rafForList).let { parser ->
-                    parser.open()
-                    parser.listAllEntries()
+            val entries = stage(
+                name = "ISO parse",
+                suggestion = "The ISO may be corrupted, UDF-only, or use an unsupported format. Try a different ISO."
+            ) {
+                RandomAccessFile(isoFile, "r").use { rafForList ->
+                    IsoParser(rafForList).let { parser ->
+                        parser.open()
+                        parser.listAllEntries()
+                    }
                 }
             }
             emitLog("${entries.size} entries found")
@@ -511,9 +519,6 @@ class BurnEngine @Inject constructor(
                 throw ce
             } catch (fastError: Exception) {
                 emitLog("⚠ Fast writer failed (${fastError.message}); falling back to compatibility mode", isWarning = true)
-                // Try to mount the existing FAT32 first (if the fast writer failed
-                // with 0 entries the FS is still pristine — reformatting would waste
-                // time and risk losing any data that DID make it to the device).
                 val rawPart = me.jahnen.libaums.core.driver.ByteBlockDevice(device.blockDevice, partitionStartLba.toInt())
                 var fallbackFs = runCatching { Fat32FileSystem.read(rawPart) }.getOrNull()
                 if (fallbackFs == null) {
@@ -525,7 +530,16 @@ class BurnEngine @Inject constructor(
                     fallbackFs = Fat32FileSystem.read(rawPart)
                         ?: throw BurnException("USB filesystem unreadable", "Try a different USB drive")
                 }
-                copyEntriesLibaums(isoFile, entries, fallbackFs.rootDirectory, startMs)
+                try {
+                    copyEntriesLibaums(isoFile, entries, fallbackFs.rootDirectory, startMs)
+                } catch (fallbackError: Exception) {
+                    if (fallbackError is kotlinx.coroutines.CancellationException) throw fallbackError
+                    emitLog("Compatibility mode also failed: ${fallbackError.message}", isWarning = true)
+                    throw BurnException(
+                        "USB write failed: ${fallbackError.message ?: fallbackError.javaClass.simpleName}",
+                        "The fallback write path also failed. Try a different USB drive or ISO."
+                    )
+                }
             }
 
             // --- Boot-sector verify + rewrite ---
@@ -618,10 +632,34 @@ class BurnEngine @Inject constructor(
     }
 
     /**
+     * Wraps a burn stage so that on failure the exception is logged with its
+     * stack trace and re-thrown as a [BurnException] prefixed with the stage
+     * name (e.g. "ISO parse failed: …"). This lets the user know exactly which
+     * phase failed.
+     */
+    private inline fun <T> stage(
+        name: String,
+        suggestion: String,
+        block: () -> T
+    ): T = try {
+        block()
+    } catch (e: BurnException) {
+        // Already wrapped — just re-throw.
+        throw e
+    } catch (e: Exception) {
+        emitLog("STAGE FAILED [$name]: ${e.javaClass.simpleName}: ${e.message}", isWarning = true)
+        throw BurnException(
+            "$name failed: ${e.message ?: e.javaClass.simpleName}",
+            suggestion
+        )
+    }
+
+    /**
      * Fast copy path: writes the entire FAT32 directory tree and file data
      * directly to the block device via [FastUsbWriter], bypassing libaums'
      * per-chunk SCSI overhead.
-     *
+     */
+    /**
      * Layout strategy:
      *  1. Pre-pass — allocate one cluster run per directory (sized to its real
      *     child count), register them, and add "."/".." entries.

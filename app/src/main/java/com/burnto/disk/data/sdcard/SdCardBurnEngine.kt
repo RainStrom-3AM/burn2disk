@@ -6,6 +6,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.burnto.disk.data.iso.IsoParser
 import com.burnto.disk.data.model.BurnException
 import com.burnto.disk.data.model.BurnState
+import com.burnto.disk.ui.Format
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -51,25 +52,39 @@ class SdCardBurnEngine @Inject constructor(
     suspend fun burn(isoFile: File, sdCardUri: Uri) = withContext(Dispatchers.IO) {
         resetState()
         val startMs = System.currentTimeMillis()
+        emitLog("SD Card copy started")
         emitLog("Parsing ISO filesystem...")
 
-        val entries = RandomAccessFile(isoFile, "r").use { raf ->
-            IsoParser(raf).let { parser ->
-                parser.open()
-                parser.listAllEntries()
+        val entries = try {
+            RandomAccessFile(isoFile, "r").use { raf ->
+                IsoParser(raf).let { parser ->
+                    parser.open()
+                    parser.listAllEntries()
+                }
             }
+        } catch (e: Exception) {
+            emitLog("ISO parse failed: ${e.message}")
+            throw BurnException(
+                "ISO parse failed: ${e.message ?: e.javaClass.simpleName}",
+                "The ISO may be corrupted or in an unsupported format. Try a different ISO."
+            )
         }
         emitLog("${entries.size} entries found")
         if (entries.isEmpty()) {
             throw BurnException("ISO contains no files", "The image may be corrupted or unsupported")
         }
 
+        emitLog("Opening SD card via SAF...")
         val destRoot = DocumentFile.fromTreeUri(context, sdCardUri)
             ?: throw BurnException("Cannot access SD card", "Grant SD card permission first")
 
         val folderName = isoFile.nameWithoutExtension
+        emitLog("Target folder: $folderName")
         val existing = destRoot.findFile(folderName)
-        existing?.delete()
+        if (existing != null) {
+            emitLog("Removing existing folder...")
+            existing.delete()
+        }
         val destFolder = destRoot.createDirectory(folderName)
             ?: throw BurnException(
                 "Cannot create folder on SD card",
@@ -81,7 +96,7 @@ class SdCardBurnEngine @Inject constructor(
         var bytesWritten = 0L
 
         // Create directory structure first.
-        val dirMap = HashMap<String, DocumentFile>()
+        val dirMap = LinkedHashMap<String, DocumentFile>()
         dirMap[""] = destFolder
 
         val dirs = entries.filter { it.isDirectory }
@@ -111,33 +126,43 @@ class SdCardBurnEngine @Inject constructor(
                     )
 
                 emitLog(entry.fullPath)
-                context.contentResolver.openOutputStream(destFile.uri)?.use { out ->
-                    isoRaf.seek(entry.extentLba * IsoParser.SECTOR_SIZE)
-                    val buf = ByteArray(4 * 1024 * 1024) // 4 MiB buffer
-                    var remaining = entry.sizeBytes
-                    while (remaining > 0) {
-                        coroutineContext.ensureActive()
-                        val toRead = minOf(buf.size.toLong(), remaining).toInt()
-                        isoRaf.readFully(buf, 0, toRead)
-                        out.write(buf, 0, toRead)
-                        bytesWritten += toRead
-                        remaining -= toRead
-                        _state.value = BurnState.Copying(
-                            currentFile = entry.fullPath,
-                            bytesWritten = bytesWritten,
-                            totalBytes = totalBytes,
-                            speedMBps = 0f,
-                            remainingSeconds = 0
-                        )
-                    }
-                } ?: throw BurnException(
-                    "Cannot write ${entry.name}",
-                    "SD card write stream failed"
-                )
+                try {
+                    context.contentResolver.openOutputStream(destFile.uri)?.use { out ->
+                        isoRaf.seek(entry.extentLba * IsoParser.SECTOR_SIZE)
+                        val buf = ByteArray(4 * 1024 * 1024) // 4 MiB buffer
+                        var remaining = entry.sizeBytes
+                        while (remaining > 0) {
+                            coroutineContext.ensureActive()
+                            val toRead = minOf(buf.size.toLong(), remaining).toInt()
+                            isoRaf.readFully(buf, 0, toRead)
+                            out.write(buf, 0, toRead)
+                            bytesWritten += toRead
+                            remaining -= toRead
+                            _state.value = BurnState.Copying(
+                                currentFile = entry.fullPath,
+                                bytesWritten = bytesWritten,
+                                totalBytes = totalBytes,
+                                speedMBps = 0f,
+                                remainingSeconds = 0
+                            )
+                        }
+                    } ?: throw BurnException(
+                        "Cannot write ${entry.name}",
+                        "SD card write stream failed"
+                    )
+                } catch (e: Exception) {
+                    if (e is BurnException) throw e
+                    emitLog("Failed to write ${entry.fullPath}: ${e.message}")
+                    throw BurnException(
+                        "Write failed at ${entry.fullPath}: ${e.message ?: e.javaClass.simpleName}",
+                        "SD card may be full or write-protected. Try freeing space or a different card."
+                    )
+                }
             }
         }
 
         val durationSec = ((System.currentTimeMillis() - startMs) / 1000).toInt()
+        emitLog("Copy complete in ${durationSec}s · ${Format.bytes(totalBytes)}")
         _state.value = BurnState.Success(totalBytes, durationSec)
     }
 
