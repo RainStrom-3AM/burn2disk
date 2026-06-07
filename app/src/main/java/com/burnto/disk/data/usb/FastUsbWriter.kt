@@ -138,11 +138,20 @@ class FastUsbWriter(
     fun writeFatChain(firstCluster: Long, clusterCount: Long) {
         if (clusterCount == 0L) return
         for (i in 0 until clusterCount) {
-            val index = (firstCluster + i).toInt()
-            if (index < 0 || index >= fat.size) {
-                throw IOException("Cluster $index out of FAT bounds (size=${fat.size})")
+            val idx: Long = firstCluster + i
+            if (idx < 0L || idx >= fat.size) {
+                throw IOException("Cluster $idx out of FAT bounds (size=${fat.size})")
             }
-            fat[index] = if (i == clusterCount - 1) EOC else (firstCluster + i + 1).toInt()
+            val index = idx.toInt()
+            fat[index] = if (i == clusterCount - 1) {
+                EOC
+            } else {
+                val nextIdx: Long = firstCluster + i + 1
+                if (nextIdx < 0L || nextIdx > Int.MAX_VALUE) {
+                    throw IOException("Next cluster $nextIdx overflows Int range")
+                }
+                nextIdx.toInt()
+            }
         }
     }
 
@@ -159,15 +168,22 @@ class FastUsbWriter(
         val firstSector = firstCluster / entriesPerSector
         val lastSector = (firstCluster + clusterCount - 1) / entriesPerSector
         val count = (lastSector - firstSector + 1).toInt()
-        val buf = ByteBuffer.allocate(count * bytesPerSector).order(ByteOrder.LITTLE_ENDIAN)
-        val baseEntry = firstSector * entriesPerSector
-        for (i in 0 until count * entriesPerSector) {
-            val idx = (baseEntry + i)
-            buf.putInt(i * 4, if (idx < fat.size) fat[idx.toInt()] else 0)
+        val bufSize = count * bytesPerSector
+        val buf = ByteBuffer.allocate(bufSize).order(ByteOrder.LITTLE_ENDIAN)
+        val baseEntry: Long = firstSector * entriesPerSector.toLong()
+        val slotCount: Long = count.toLong() * entriesPerSector.toLong()
+        for (i in 0 until slotCount) {
+            val idx: Long = baseEntry + i
+            val fatVal = when {
+                idx < 0L -> 0
+                idx >= fat.size -> 0
+                else -> fat[idx.toInt()]
+            }
+            buf.putInt((i * 4).toInt(), fatVal)
         }
-        buf.position(0); buf.limit(count * bytesPerSector)
+        buf.position(0); buf.limit(bufSize)
         blockDevice.write(geo.fatStartLba + firstSector, buf)
-        buf.position(0); buf.limit(count * bytesPerSector)
+        buf.position(0); buf.limit(bufSize)
         blockDevice.write(geo.fat2StartLba + firstSector, buf)
     }
 

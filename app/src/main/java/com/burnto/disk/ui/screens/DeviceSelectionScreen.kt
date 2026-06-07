@@ -87,7 +87,8 @@ fun DeviceSelectionScreen(
 
     val context = androidx.compose.ui.platform.LocalContext.current
     val sdCardManager = remember { com.burnto.disk.data.sdcard.SdCardManager(context) }
-    val sdCard by remember { mutableStateOf(sdCardManager.detectSdCard()) }
+    var sdCard by remember { mutableStateOf(sdCardManager.detectSdCard()) }
+    val hasPersistedUri = remember { sdCardManager.loadPersistedUri() != null }
 
     var sheetTarget by remember { mutableStateOf<BurnTarget?>(null) }
     val sheetState = rememberModalBottomSheetState()
@@ -98,13 +99,13 @@ fun DeviceSelectionScreen(
         if (result.resultCode == Activity.RESULT_OK) {
             result.data?.data?.let { uri ->
                 val info = sdCardManager.persistUri(uri)
-                // Merge the persisted URI with the detected info (capacity, name).
                 val merged = sdCard?.copy(
                     uri = info.uri,
                     displayName = info.displayName,
                     freeBytes = info.freeBytes,
                     totalBytes = info.totalBytes
                 ) ?: info
+                sdCard = merged
                 viewModel.selectSdCard(merged)
                 sheetTarget = BurnTarget.SdCard(merged)
             }
@@ -181,28 +182,29 @@ fun DeviceSelectionScreen(
                     Text("SD Card", style = MaterialTheme.typography.titleMedium, color = Amber)
                 }
 
-                if (sdCard != null) {
-                    item {
+                item {
+                    if (sdCard != null) {
                         SdCardCard(
                             info = sdCard!!,
                             selected = selected is BurnTarget.SdCard,
                             onClick = {
                                 val persistedUri = sdCardManager.loadPersistedUri()
                                 if (persistedUri != null) {
-                                    // We already have SAF permission — use the persisted URI.
                                     val info = sdCard!!.copy(uri = persistedUri)
                                     viewModel.selectSdCard(info)
                                     sheetTarget = BurnTarget.SdCard(info)
                                 } else {
-                                    // No SAF permission yet — launch the picker.
                                     sdCardLauncher.launch(sdCardManager.requestAccessIntent())
                                 }
                             }
                         )
-                    }
-                } else {
-                    item {
-                        NoSdCardState()
+                    } else {
+                        // Auto-detection failed (common on Xiaomi/MIUI) — still offer
+                        // a manual SAF picker. SAF works on ALL filesystems without root.
+                        SdCardManualCard(
+                            hasPersistedAccess = hasPersistedUri,
+                            onPickFolder = { sdCardLauncher.launch(sdCardManager.requestAccessIntent()) }
+                        )
                     }
                 }
             }
@@ -335,6 +337,67 @@ private fun SdCardCard(
                         tint = NearBlack,
                         modifier = Modifier.size(16.dp)
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SdCardManualCard(
+    hasPersistedAccess: Boolean,
+    onPickFolder: () -> Unit
+) {
+    Card(
+        onClick = onPickFolder,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = NearBlack),
+        border = BorderStroke(1.dp, OutlineDark)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Filled.SdCard,
+                contentDescription = null,
+                tint = if (hasPersistedAccess) Amber else TextSecondary,
+                modifier = Modifier.size(40.dp)
+            )
+            Spacer(Modifier.size(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (hasPersistedAccess) "SD Card (access granted)" else "SD Card",
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+                Text(
+                    text = if (hasPersistedAccess)
+                        "Tap to re-select SD card folder"
+                    else
+                        "Auto-detection failed — tap to select SD card folder manually",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary
+                )
+                if (!hasPersistedAccess) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = Color(0xFFFFA000),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.size(4.dp))
+                        Text(
+                            "SAF works on FAT16, FAT32, exFAT, NTFS, ext4",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFFA000)
+                        )
+                    }
                 }
             }
         }

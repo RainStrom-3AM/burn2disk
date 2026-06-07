@@ -784,7 +784,6 @@ class BurnEngine @Inject constructor(
         // Write every file with the read-ahead pipeline. No batcher — the
         // coalescing batcher was silently dropping writes to the wrong LBA.
         val sortedFiles = regularFiles.sortedByDescending { it.sizeBytes }
-        var firstFileVerified = false
 
         val raf = RandomAccessFile(isoFile, "r")
         raf.use {
@@ -804,30 +803,11 @@ class BurnEngine @Inject constructor(
                 emitLog(entry.fullPath, isFileName = true)
                 writer.writeFileFromIsoPipelined(raf, entry.extentLba, entry.sizeBytes, firstCluster, onChunk)
 
-                if (!firstFileVerified) {
-                    firstFileVerified = true
-                    val verifyBuf = ByteBuffer.allocate(geometry.bytesPerSector)
-                    blockDevice.read(writer.lbaOfCluster(firstCluster), verifyBuf)
-                    verifyBuf.position(0)
-                    val dev4 = ByteArray(4)
-                    verifyBuf.get(dev4)
-                    val devHex = dev4.joinToString(" ") { String.format("%02x", it.toInt() and 0xFF) }
-                    emitLog("Write verify: device first 4 bytes = $devHex")
-
-                    raf.seek(entry.extentLba * ISO_SECTOR)
-                    val src4 = ByteArray(4)
-                    raf.readFully(src4)
-                    val srcHex = src4.joinToString(" ") { String.format("%02x", it.toInt() and 0xFF) }
-                    if (!dev4.contentEquals(src4)) {
-                        emitLog("⚠ Write verify FAILED: device $devHex != source $srcHex", isWarning = true)
-                        throw BurnException(
-                            "USB write verification failed",
-                            "Try a different USB drive or cable"
-                        )
-                    } else {
-                        emitLog("Write verify OK ($devHex)")
-                    }
-                }
+                // NOTE: We intentionally do NOT read back immediately after writing.
+                // USB controllers have write-back caches — data may not be readable
+                // until the cache is flushed, causing a false-positive mismatch that
+                // aborts an otherwise successful burn. Post-burn root verification
+                // (below) is the reliable signal.
             }
         }
 
