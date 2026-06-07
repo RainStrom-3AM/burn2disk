@@ -286,7 +286,7 @@ class FastUsbWriter(
         written
     }
 
-    /** Absolute device LBA of a cluster (exposed for the write batcher). */
+    /** Absolute device LBA of a cluster (exposed for BurnEngine verification). */
     fun lbaOfCluster(cluster: Long): Long = geo.clusterToLba(cluster)
 
     /**
@@ -368,109 +368,6 @@ class FastUsbWriter(
     fun paddedClusterBytes(sizeBytes: Long): Int {
         val clusters = if (sizeBytes == 0L) 1L else (sizeBytes + clusterBytes - 1) / clusterBytes
         return (clusters * clusterBytes).toInt()
-    }
-
-    /** Creates a coalescing write batcher bound to this writer's block device. */
-    fun newBatcher(): WriteBatcher = WriteBatcher()
-
-    /**
-     * Coalesces many small files into a single large SCSI WRITE.
-     *
-     * libaums issues one WRITE(10) per [BlockDeviceDriver.write] call, so writing
-     * hundreds of tiny files individually is dominated by per-command overhead.
-     * This accumulates consecutive files' (cluster-padded) data into one heap
-     * buffer and flushes the whole run in a single write.
-     *
-     * Correctness: a single write must target one contiguous LBA region, so the
-     * batcher only appends a file when its start LBA equals the LBA immediately
-     * after the buffered data. A non-contiguous file (or a full buffer) forces a
-     * flush and starts a fresh batch — it can never land data at the wrong LBA.
-     *
-     * The buffer is a HEAP [ByteBuffer] (not direct): libaums' bulk transfer calls
-     * `buffer.array()`, which throws on direct buffers.
-     */
-    inner class WriteBatcher {
-        // 80% of currently-available heap, capped at 32 MiB, floored at the
-        // benchmarked chunk size, rounded down to a whole number of clusters.
-        private var bufferSize: Int = computeBufferSize()
-        private var buffer: ByteBuffer = ByteBuffer.allocate(bufferSize)
-        private var bufferStartLba: Long = -1L
-        private var filesInBatch: Int = 0
-        private var flushCount: Int = 0
-        private var filesCoalesced: Int = 0
-
-        val batchWrites: Int get() = flushCount
-        val coalescedFiles: Int get() = filesCoalesced
-
-        private fun computeBufferSize(): Int {
-            val rt = Runtime.getRuntime()
-            val avail = rt.maxMemory() - rt.totalMemory() + rt.freeMemory()
-            val target = minOf((avail * 0.8).toLong(), 32L * 1024 * 1024)
-                .toInt().coerceAtLeast(optimalChunkBytes)
-            // Round down to a whole number of clusters (>= 1 cluster).
-            return (target / clusterBytes).coerceAtLeast(1) * clusterBytes
-        }
-
-        /** Largest single file (padded) this batcher's buffer can hold. */
-        fun canHold(paddedSize: Int): Boolean = paddedSize <= bufferSize
-
-        /** LBA the next contiguous file must start at to extend the batch. */
-        private fun expectedNextLba(): Long =
-            bufferStartLba + (buffer.position() / bytesPerSector)
-
-        /**
-         * Appends one file's pre-read bytes to the batch, flushing first if it is
-         * not contiguous with the current batch or would overflow the buffer.
-         */
-        suspend fun queue(data: ByteArray, validLen: Int, fileLba: Long) {
-            val paddedSize = run {
-                val clusters = ((validLen + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
-                clusters * clusterBytes
-            }
-            val contiguous = bufferStartLba != -1L && fileLba == expectedNextLba()
-            if (buffer.position() == 0) {
-                bufferStartLba = fileLba
-            } else if (!contiguous || paddedSize > buffer.remaining()) {
-                flush()
-                bufferStartLba = fileLba
-            }
-            buffer.put(data, 0, validLen)
-            // Zero-pad the tail of the file's last cluster. Use Arrays.fill on the
-            // backing array (a fast JVM intrinsic) instead of a per-byte loop.
-            // NOTE: we cannot just advance the position — the buffer is reused
-            // across batches and clear() does not re-zero it, so the pad region
-            // could otherwise contain stale bytes from a previous file.
-            val padLen = paddedSize - validLen
-            if (padLen > 0) {
-                val pos = buffer.position()
-                java.util.Arrays.fill(buffer.array(), pos, pos + padLen, 0.toByte())
-                buffer.position(pos + padLen)
-            }
-            filesInBatch++
-            filesCoalesced++
-        }
-
-        /** Writes the accumulated buffer to the device in a single write. */
-        suspend fun flush() = withContext(Dispatchers.IO) {
-            if (buffer.position() == 0) return@withContext
-            val len = buffer.position()
-            buffer.position(0)
-            buffer.limit(len)
-            blockDevice.write(bufferStartLba, buffer)
-            buffer.clear()
-            bufferStartLba = -1L
-            filesInBatch = 0
-            flushCount++
-
-            // Memory guard: if free heap is getting tight, shrink the buffer for
-            // the rest of the burn to avoid OOM on low-RAM devices.
-            val rt = Runtime.getRuntime()
-            val avail = rt.maxMemory() - rt.totalMemory() + rt.freeMemory()
-            if (avail < 20L * 1024 * 1024 && bufferSize > clusterBytes * 2) {
-                bufferSize = (bufferSize / 2 / clusterBytes).coerceAtLeast(1) * clusterBytes
-                buffer = ByteBuffer.allocate(bufferSize)
-            }
-        }
     }
 
     /** Writes every queued directory's entries to its cluster run. */

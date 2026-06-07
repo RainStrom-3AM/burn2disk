@@ -724,24 +724,10 @@ class BurnEngine @Inject constructor(
         }
 
         // --- File pass: regular ISO files ---
-        // Sort largest-first so the big files write directly and all the small
-        // files end up grouped in the contiguous tail of the allocation, where
-        // the batcher can coalesce them into a few large SCSI writes.
+        // Write every file with the read-ahead pipeline. No batcher — the
+        // coalescing batcher was silently dropping writes to the wrong LBA.
         val sortedFiles = regularFiles.sortedByDescending { it.sizeBytes }
-        val SMALL_FILE_LIMIT = 4L * 1024 * 1024   // batch files under 4 MiB
-        val LOG_INDIVIDUAL_MIN = 64L * 1024       // files >= 64 KiB still log individually
-
-        val batcher = writer.newBatcher()
-        var batchedSmallCount = 0
-        var batchedSmallGroupDir = ""
-
-        // Flushes the "N small files" grouped log line when the small-file run ends.
-        fun flushSmallLog() {
-            if (batchedSmallCount > 0) {
-                emitLog("Writing $batchedSmallCount small files... ($batchedSmallGroupDir)", isFileName = true)
-                batchedSmallCount = 0
-            }
-        }
+        var firstFileVerified = false
 
         val raf = RandomAccessFile(isoFile, "r")
         raf.use {
@@ -754,38 +740,34 @@ class BurnEngine @Inject constructor(
                 writer.flushFatSectors(firstCluster, clusters)
                 writer.addDirectoryEntry(parentPath, entry.name, firstCluster, entry.sizeBytes, isDirectory = false)
 
-                val fileLba = writer.lbaOfCluster(firstCluster)
-                val paddedSize = writer.paddedClusterBytes(entry.sizeBytes)
-                val small = entry.sizeBytes in 1 until SMALL_FILE_LIMIT && batcher.canHold(paddedSize)
+                emitLog(entry.fullPath, isFileName = true)
+                writer.writeFileFromIsoPipelined(raf, entry.extentLba, entry.sizeBytes, firstCluster, onChunk)
 
-                if (small) {
-                    // Read the small file fully and hand it to the coalescing batcher.
+                if (!firstFileVerified) {
+                    firstFileVerified = true
+                    val verifyBuf = ByteBuffer.allocate(geometry.bytesPerSector)
+                    blockDevice.read(writer.lbaOfCluster(firstCluster), verifyBuf)
+                    verifyBuf.position(0)
+                    val dev4 = ByteArray(4)
+                    verifyBuf.get(dev4)
+                    val devHex = dev4.joinToString(" ") { String.format("%02x", it.toInt() and 0xFF) }
+                    emitLog("Write verify: device first 4 bytes = $devHex")
+
                     raf.seek(entry.extentLba * ISO_SECTOR)
-                    val data = ByteArray(entry.sizeBytes.toInt())
-                    raf.readFully(data)
-                    batcher.queue(data, data.size, fileLba)
-                    onChunk(entry.sizeBytes)
-
-                    if (entry.sizeBytes < LOG_INDIVIDUAL_MIN) {
-                        batchedSmallCount++
-                        batchedSmallGroupDir = if (parentPath.isEmpty()) "/" else "$parentPath/"
+                    val src4 = ByteArray(4)
+                    raf.readFully(src4)
+                    val srcHex = src4.joinToString(" ") { String.format("%02x", it.toInt() and 0xFF) }
+                    if (!dev4.contentEquals(src4)) {
+                        emitLog("⚠ Write verify FAILED: device $devHex != source $srcHex", isWarning = true)
+                        throw BurnException(
+                            "USB write verification failed",
+                            "Try a different USB drive or cable"
+                        )
                     } else {
-                        flushSmallLog()
-                        emitLog(entry.fullPath, isFileName = true)
+                        emitLog("Write verify OK ($devHex)")
                     }
-                } else {
-                    // Large (or zero-length) file: drain pending small files first
-                    // so ordering/contiguity is preserved, then stream it directly
-                    // with the read-ahead pipeline (overlaps ISO read + USB write).
-                    batcher.flush()
-                    flushSmallLog()
-                    emitLog(entry.fullPath, isFileName = true)
-                    writer.writeFileFromIsoPipelined(raf, entry.extentLba, entry.sizeBytes, firstCluster, onChunk)
                 }
             }
-            // Drain any remaining batched small files.
-            batcher.flush()
-            flushSmallLog()
         }
 
         // --- File pass: split WIM parts (already on local disk) ---
@@ -810,12 +792,30 @@ class BurnEngine @Inject constructor(
         writer.flushFat()
         writer.updateFsInfo()
 
-        // Coalescing efficiency summary.
-        val coalesced = batcher.coalescedFiles
-        val batchWrites = batcher.batchWrites
-        if (coalesced > 0 && batchWrites > 0) {
-            val pct = (100 - (batchWrites * 100 / coalesced.coerceAtLeast(1))).coerceIn(0, 100)
-            emitLog("Write efficiency: $coalesced small files → $batchWrites batch writes ($pct% coalesced)")
+        // --- Post-burn verification: read back root directory ---
+        val rootLba = writer.lbaOfCluster(geometry.rootCluster)
+        val rootBuf = ByteBuffer.allocate(geometry.bytesPerSector)
+        blockDevice.read(rootLba, rootBuf)
+        rootBuf.position(0)
+        val rootBytes = rootBuf.array()
+        var rootEntryCount = 0
+        var idx = 0
+        while (idx < rootBytes.size) {
+            val firstByte = rootBytes[idx].toInt() and 0xFF
+            val attr = rootBytes[idx + 11].toInt() and 0xFF
+            if (firstByte == 0) break // end of directory
+            if (firstByte != 0xE5 && attr != 0x08 && attr != 0x0F) {
+                rootEntryCount++
+            }
+            idx += 32
+        }
+        val totalFiles = regularFiles.size + swmParts.size
+        emitLog("Wrote $totalFiles files, ${dirs.size} directories to USB (root entries: $rootEntryCount)")
+        if (rootEntryCount == 0) {
+            throw BurnException(
+                "No files were written to USB",
+                "Internal error — please try burning again"
+            )
         }
 
         // Final 100% copy state.
