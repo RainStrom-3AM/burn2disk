@@ -90,31 +90,35 @@ class IsoParser(private val raf: RandomAccessFile) : Closeable {
             sector.get(identifier)
             val id = String(identifier, Charsets.US_ASCII)
 
-            if (id != "CD001") {
-                // Not a valid descriptor area; stop scanning.
-                break
+            if (id == "CD001") {
+                when (type) {
+                    VD_PRIMARY -> {
+                        rootRecord = readRootRecord(sector)
+                        _systemIdentifier = readString(sector, 8, 32)
+                        _volumeLabel = readString(sector, 40, 32)
+                    }
+                    VD_SUPPLEMENTARY -> {
+                        if (isJoliet(sector)) {
+                            rootRecordJoliet = readRootRecord(sector)
+                        }
+                    }
+                    VD_TERMINATOR -> break
+                }
+            } else {
+                // Skip non-ISO 9660 descriptors (UDF, El Torito, etc.) and keep
+                // scanning. UDF-bridge discs interleave these before the PVD.
             }
 
-            when (type) {
-                VD_PRIMARY -> {
-                    rootRecord = readRootRecord(sector)
-                    _systemIdentifier = readString(sector, 8, 32)
-                    _volumeLabel = readString(sector, 40, 32)
-                }
-                VD_SUPPLEMENTARY -> {
-                    if (isJoliet(sector)) {
-                        rootRecordJoliet = readRootRecord(sector)
-                    }
-                }
-                VD_TERMINATOR -> break
-            }
             lba++
             if (lba > FIRST_DESCRIPTOR_LBA + 64) break // safety bound
         }
 
         usingJoliet = rootRecordJoliet != null
         if (rootRecord == null && rootRecordJoliet == null) {
-            throw IllegalStateException("No ISO 9660 primary volume descriptor found")
+            throw IllegalStateException(
+                "No ISO 9660 primary volume descriptor found. " +
+                    "The image may be UDF-only or not a valid ISO 9660 disc."
+            )
         }
     }
 

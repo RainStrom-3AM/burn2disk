@@ -506,15 +506,20 @@ class BurnEngine @Inject constructor(
                 throw ce
             } catch (fastError: Exception) {
                 emitLog("⚠ Fast writer failed (${fastError.message}); falling back to compatibility mode", isWarning = true)
-                // Re-format to clear any partial structures, then remount and copy
-                // via libaums.
-                _state.value = BurnState.Formatting(0)
-                Fat32Formatter(device.blockDevice).format(formatCapacity, label) { pct ->
-                    _state.value = BurnState.Formatting(pct)
+                // Try to mount the existing FAT32 first (if the fast writer failed
+                // with 0 entries the FS is still pristine — reformatting would waste
+                // time and risk losing any data that DID make it to the device).
+                val rawPart = me.jahnen.libaums.core.driver.ByteBlockDevice(device.blockDevice, partitionStartLba.toInt())
+                var fallbackFs = runCatching { Fat32FileSystem.read(rawPart) }.getOrNull()
+                if (fallbackFs == null) {
+                    emitLog("Re-formatting before compatibility fallback...")
+                    _state.value = BurnState.Formatting(0)
+                    Fat32Formatter(device.blockDevice).format(formatCapacity, label) { pct ->
+                        _state.value = BurnState.Formatting(pct)
+                    }
+                    fallbackFs = Fat32FileSystem.read(rawPart)
+                        ?: throw BurnException("USB filesystem unreadable", "Try a different USB drive")
                 }
-                val fallbackFs = Fat32FileSystem.read(
-                    me.jahnen.libaums.core.driver.ByteBlockDevice(device.blockDevice, partitionStartLba.toInt())
-                ) ?: throw BurnException("USB filesystem unreadable", "Try a different USB drive")
                 copyEntriesLibaums(isoFile, entries, fallbackFs.rootDirectory, startMs)
             }
 
@@ -635,6 +640,13 @@ class BurnEngine @Inject constructor(
         val writer = FastUsbWriter(blockDevice, geometry, optimalChunk, label)
         writer.setRootCluster(geometry.rootCluster)
         resetSpeedSamples()
+
+        emitLog("DEBUG: total entries from IsoParser = ${entries.size}")
+        emitLog("DEBUG: dirs = ${entries.count { it.isDirectory }}")
+        emitLog("DEBUG: files = ${entries.count { !it.isDirectory }}")
+        entries.take(5).forEach {
+            emitLog("DEBUG entry: ${it.fullPath} dir=${it.isDirectory} size=${it.sizeBytes}")
+        }
 
         val clusterBytes = geometry.clusterBytes
         fun clustersFor(bytes: Long): Long =
@@ -888,36 +900,52 @@ class BurnEngine @Inject constructor(
         var lastReport = 0L
         resetSpeedSamples()
         recordSample(System.currentTimeMillis(), 0L)
+        var fileCount = 0
 
         val raf = RandomAccessFile(isoFile, "r")
         raf.use {
             for (entry in entries.filter { !it.isDirectory }) {
                 coroutineContext.ensureActive()
-                val name = entry.name.lowercase()
-                if (name in SPLITTABLE && entry.sizeBytes > FAT32_FILE_LIMIT) {
-                    bytesWritten += handleLargeWimLibaums(isoFile, entry, root, dirCache)
-                    continue
-                }
-                val parentPath = entry.fullPath.substringBeforeLast('/', "")
-                val parentDir = dirCache[parentPath] ?: mkdirs(root, parentPath, dirCache)
-                emitLog(entry.fullPath, isFileName = true)
-                val target = parentDir.createFile(entry.name)
-                bytesWritten += writeIsoExtentToUsb(raf, entry.extentLba, entry.sizeBytes, target)
-                target.close()
+                try {
+                    val name = entry.name.lowercase()
+                    if (name in SPLITTABLE && entry.sizeBytes > FAT32_FILE_LIMIT) {
+                        bytesWritten += handleLargeWimLibaums(isoFile, entry, root, dirCache)
+                        fileCount++
+                        continue
+                    }
+                    val parentPath = entry.fullPath.substringBeforeLast('/', "")
+                    val parentDir = dirCache[parentPath] ?: mkdirs(root, parentPath, dirCache)
+                    emitLog(entry.fullPath, isFileName = true)
+                    val target = parentDir.createFile(entry.name)
+                    bytesWritten += writeIsoExtentToUsb(raf, entry.extentLba, entry.sizeBytes, target)
+                    target.close()
+                    fileCount++
 
-                val now = System.currentTimeMillis()
-                if (now - lastReport >= PROGRESS_INTERVAL_MS) {
-                    recordSample(now, bytesWritten)
-                    _state.value = BurnState.Copying(
-                        currentFile = entry.fullPath,
-                        bytesWritten = bytesWritten,
-                        totalBytes = totalBytes,
-                        speedMBps = rollingSpeedMBps(),
-                        remainingSeconds = etaSeconds(bytesWritten, totalBytes)
-                    )
-                    lastReport = now
+                    val now = System.currentTimeMillis()
+                    if (now - lastReport >= PROGRESS_INTERVAL_MS) {
+                        recordSample(now, bytesWritten)
+                        _state.value = BurnState.Copying(
+                            currentFile = entry.fullPath,
+                            bytesWritten = bytesWritten,
+                            totalBytes = totalBytes,
+                            speedMBps = rollingSpeedMBps(),
+                            remainingSeconds = etaSeconds(bytesWritten, totalBytes)
+                        )
+                        lastReport = now
+                    }
+                } catch (e: Exception) {
+                    emitLog("⚠ Failed to write ${entry.fullPath}: ${e.message}", isWarning = true)
+                    // Continue to next file; partial burns are better than aborts.
                 }
             }
+        }
+
+        emitLog("Compatibility mode wrote $fileCount files to USB")
+        if (fileCount == 0) {
+            throw BurnException(
+                "No files were written to USB",
+                "ISO may be in an unsupported format. Try a different ISO or USB drive."
+            )
         }
 
         _state.value = BurnState.Copying("Done", totalBytes, totalBytes, 0f, 0)
