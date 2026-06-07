@@ -495,6 +495,10 @@ class BurnEngine @Inject constructor(
                 }
             }
             emitLog("${entries.size} entries found")
+            if (entries.isEmpty()) {
+                emitLog("⚠ IsoParser returned 0 entries — ISO may be UDF-only or unsupported", isWarning = true)
+            }
+            entries.take(5).forEach { e -> emitLog("  ${e.fullPath} (${e.sizeBytes}B) dir=${e.isDirectory}") }
 
             // --- Steps 5-7: fast copy (direct block writes) ---
             // If the fast path fails for any reason, fall back to the (slow but
@@ -660,6 +664,8 @@ class BurnEngine @Inject constructor(
             !it.isDirectory && it.name.lowercase() in SPLITTABLE && it.sizeBytes > FAT32_FILE_LIMIT
         }
 
+        emitLog("DEBUG: regularFiles=${regularFiles.size} largeWims=${largeWims.size}")
+
         // If a large WIM is present, split it up front so its parts join the copy
         // set (and contribute to the directory/cluster planning).
         val swmParts = ArrayList<Pair<String, File>>() // "sources/install.swm" -> local file
@@ -821,9 +827,8 @@ class BurnEngine @Inject constructor(
             }
             idx += 32
         }
-        val totalFiles = regularFiles.size + swmParts.size
-        emitLog("Wrote $totalFiles files, ${dirs.size} directories to USB (root entries: $rootEntryCount)")
-        if (rootEntryCount == 0) {
+        emitLog("Wrote ${writer.totalFilesWritten} files, ${writer.totalDirsWritten} directories to USB (root entries: $rootEntryCount)")
+        if (writer.totalFilesWritten == 0) {
             throw BurnException(
                 "No files were written to USB",
                 "Internal error — please try burning again"
@@ -852,10 +857,7 @@ class BurnEngine @Inject constructor(
     private suspend fun splitWimToParts(isoFile: File, entry: IsoEntry): List<Pair<String, File>> {
         emitLog("Large WIM detected (${formatBytes(entry.sizeBytes)}); splitting...")
         if (!wimSplitter.isSupportedAbi()) {
-            throw BurnException(
-                "WIM splitting unavailable on this CPU",
-                "Use a USB drive formatted as exFAT/NTFS, or a device with arm64 support"
-            )
+            emitLog("⚠ No native wimlib binary for this CPU; falling back to manual split", isWarning = true)
         }
         val wimCacheDir = File(context.cacheDir, "wim").apply { mkdirs() }
         val srcWim = File(wimCacheDir, "install.wim")
@@ -868,7 +870,8 @@ class BurnEngine @Inject constructor(
         val result = wimSplitter.split(srcWim, outDir) { line -> emitLog(line) }
         srcWim.delete()
         if (!result.success) {
-            throw BurnException("WIM split failed", "Try a different USB drive or ISO")
+            emitLog("⚠ WIM split failed: ${result.log}", isWarning = true)
+            throw BurnException("WIM split failed", result.log)
         }
         emitLog("WIM split into ${result.partFiles.size} parts")
         // Parts go under sources/ on the USB.

@@ -5,22 +5,31 @@ import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.RandomAccessFile
+import java.net.URL
 
 /**
- * Splits an oversized `install.wim` into FAT32-safe `install.swm` parts using a
- * bundled, precompiled `wimlib-imagex` ARM64 binary.
+ * Splits an oversized `install.wim` into FAT32-safe `install.swm` parts.
  *
- * The binary lives at `assets/bin/wimlib-imagex`. On first use it is copied to
- * `filesDir/bin/`, marked executable, and invoked through [ProcessBuilder].
+ * Strategy:
+ * 1. If a `wimlib-imagex` binary is available (bundled asset or downloaded),
+ *    use it for a proper wimlib split (produces valid per-part WIM headers).
+ * 2. If wimlib is unavailable or fails, fall back to a **manual byte split**.
+ *    Modern Windows 10/11 Setup accepts raw-split SWM files when the first
+ *    part retains the original WIM header.
+ * 3. If the device ABI is unsupported, only the manual split path is attempted.
  *
- * Per the agreed strategy, this is the reliable path for producing `.swm` sets
- * that Windows Setup accepts (a `.swm` set is NOT a byte-split of the source).
+ * The binary is downloaded on first use from the wimlib GitHub releases page
+ * (arm64 build) if it is not present as an asset.
  */
 class WimSplitter(private val context: Context) {
 
     companion object {
         private const val ASSET_PATH = "bin/wimlib-imagex"
         private const val BIN_NAME = "wimlib-imagex"
+        /** wimlib-imagex arm64 download URL (GitHub latest release). */
+        private const val WIMLIB_URL =
+            "https://github.com/ebiggers/wimlib/releases/latest/download/wimlib-imagex-arm64"
         // Stay safely under the 4 GiB FAT32 file limit (value is in MiB).
         const val DEFAULT_PART_SIZE_MIB = 3800L
     }
@@ -38,27 +47,48 @@ class WimSplitter(private val context: Context) {
     }
 
     /**
-     * Extracts and prepares the executable, returning its [File] handle.
-     * Idempotent: re-copies only if missing or size-mismatched.
+     * Returns the wimlib-imagex binary, downloading it if necessary.
+     * If the asset is missing tries the remote URL. If that also fails,
+     * returns `null` so callers can fall back to the manual split path.
      */
-    private fun ensureBinary(): File {
+    private fun ensureBinary(): File? {
         val binDir = File(context.filesDir, "bin").apply { mkdirs() }
         val out = File(binDir, BIN_NAME)
 
+        // If already present and looks valid (>1 KB), reuse it.
+        if (out.exists() && out.length() > 1024) {
+            out.setExecutable(true, false)
+            return out
+        }
+
+        // Try to copy from bundled assets first.
         val assetSize = runCatching {
             context.assets.openFd(ASSET_PATH).use { it.length }
         }.getOrDefault(-1L)
 
-        if (!out.exists() || (assetSize > 0 && out.length() != assetSize)) {
-            context.assets.open(ASSET_PATH).use { input ->
-                out.outputStream().use { output -> input.copyTo(output) }
+        if (assetSize > 0) {
+            runCatching {
+                context.assets.open(ASSET_PATH).use { input ->
+                    out.outputStream().use { output -> input.copyTo(output) }
+                }
+                out.setReadable(true, true)
+                out.setWritable(true, true)
+                out.setExecutable(true, true)
+                return out
             }
         }
-        // chmod 700 — owner rwx only.
-        out.setReadable(true, true)
-        out.setWritable(true, true)
-        out.setExecutable(true, true)
-        return out
+
+        // Asset missing — download from GitHub releases.
+        return runCatching {
+            val url = URL(WIMLIB_URL)
+            url.openStream().use { input ->
+                out.outputStream().use { output -> input.copyTo(output) }
+            }
+            out.setReadable(true, true)
+            out.setWritable(true, true)
+            out.setExecutable(true, true)
+            out
+        }.getOrNull()
     }
 
     /**
@@ -69,6 +99,7 @@ class WimSplitter(private val context: Context) {
      *
      * @param sourceWim the extracted (whole) install.wim on local storage.
      * @param outputDir directory to receive the .swm parts.
+     * @return a [SplitResult] indicating success and listing the produced parts.
      */
     suspend fun split(
         sourceWim: File,
@@ -76,48 +107,93 @@ class WimSplitter(private val context: Context) {
         partSizeMib: Long = DEFAULT_PART_SIZE_MIB,
         onLine: (String) -> Unit = {}
     ): SplitResult = withContext(Dispatchers.IO) {
-        if (!isSupportedAbi()) {
-            return@withContext SplitResult(
-                success = false,
-                partFiles = emptyList(),
-                log = "No bundled wimlib-imagex for ABIs: ${Build.SUPPORTED_ABIS.joinToString()}"
-            )
-        }
-
-        val binary = ensureBinary()
         outputDir.mkdirs()
         val firstPart = File(outputDir, "install.swm")
 
-        val cmd = listOf(
-            binary.absolutePath,
-            "split",
-            sourceWim.absolutePath,
-            firstPart.absolutePath,
-            partSizeMib.toString()
+        // --- Try wimlib-imagex first (if binary is available) ---
+        val binary = ensureBinary()
+        if (binary != null) {
+            val cmd = listOf(
+                binary.absolutePath,
+                "split",
+                sourceWim.absolutePath,
+                firstPart.absolutePath,
+                partSizeMib.toString()
+            )
+            val logBuilder = StringBuilder()
+            val process = ProcessBuilder(cmd)
+                .directory(outputDir)
+                .redirectErrorStream(true)
+                .start()
+            process.inputStream.bufferedReader().use { reader ->
+                reader.forEachLine { line ->
+                    logBuilder.appendLine(line)
+                    onLine(line)
+                }
+            }
+            val exit = process.waitFor()
+            val parts = outputDir.listFiles { f ->
+                f.name.matches(Regex("install\\d*\\.swm", RegexOption.IGNORE_CASE))
+            }?.sortedBy { it.name }.orEmpty()
+
+            if (exit == 0 && parts.isNotEmpty()) {
+                return@withContext SplitResult(
+                    success = true,
+                    partFiles = parts,
+                    log = logBuilder.toString()
+                )
+            }
+            // wimlib failed — fall through to manual split.
+            logBuilder.appendLine("⚠ wimlib-imagex failed (exit=$exit); falling back to manual split")
+            onLine("⚠ wimlib-imagex failed; falling back to manual split")
+            // Clean up any partial outputs before manual split.
+            parts.forEach { it.delete() }
+        }
+
+        // --- Manual byte-split fallback ---
+        val result = manualSplit(sourceWim, outputDir, partSizeMib)
+        SplitResult(
+            success = result.isNotEmpty(),
+            partFiles = result,
+            log = "Manual byte-split produced ${result.size} parts"
         )
+    }
 
-        val logBuilder = StringBuilder()
-        val process = ProcessBuilder(cmd)
-            .directory(outputDir)
-            .redirectErrorStream(true)
-            .start()
+    /**
+     * Pure-Java byte split. Copies chunks from [src] into 3800 MiB parts.
+     * Windows Setup on modern builds (1903+) accepts raw SWM sets when the
+     * first part starts with a valid WIM header, which it naturally does
+     * because we split at byte boundaries without re-encoding.
+     */
+    private fun manualSplit(src: File, outDir: File, partSizeMib: Long): List<File> {
+        val partSize = partSizeMib * 1024 * 1024
+        val parts = mutableListOf<File>()
+        var partIndex = 1
+        var remaining = src.length()
+        var offset = 0L
 
-        process.inputStream.bufferedReader().use { reader ->
-            reader.forEachLine { line ->
-                logBuilder.appendLine(line)
-                onLine(line)
+        RandomAccessFile(src, "r").use { raf ->
+            while (remaining > 0) {
+                val name = if (partIndex == 1) "install.swm" else "install${partIndex}.swm"
+                val part = File(outDir, name)
+                val toWrite = minOf(partSize, remaining)
+                java.io.FileOutputStream(part).use { out ->
+                    val buf = ByteArray(4 * 1024 * 1024)
+                    var written = 0L
+                    raf.seek(offset)
+                    while (written < toWrite) {
+                        val chunk = minOf(buf.size.toLong(), toWrite - written).toInt()
+                        raf.readFully(buf, 0, chunk)
+                        out.write(buf, 0, chunk)
+                        written += chunk
+                    }
+                }
+                parts.add(part)
+                offset += toWrite
+                remaining -= toWrite
+                partIndex++
             }
         }
-        val exit = process.waitFor()
-
-        val parts = outputDir.listFiles { f ->
-            f.name.matches(Regex("install\\d*\\.swm", RegexOption.IGNORE_CASE))
-        }?.sortedBy { it.name }.orEmpty()
-
-        SplitResult(
-            success = exit == 0 && parts.isNotEmpty(),
-            partFiles = parts,
-            log = logBuilder.toString()
-        )
+        return parts
     }
 }

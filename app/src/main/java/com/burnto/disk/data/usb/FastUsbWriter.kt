@@ -65,6 +65,12 @@ class FastUsbWriter(
     // path -> short names already used in that directory (for ~N uniqueness)
     private val usedShortNames = HashMap<String, MutableSet<String>>()
 
+    /** Counters for burn verification. */
+    var totalFilesWritten: Int = 0
+        private set
+    var totalDirsWritten: Int = 0
+        private set
+
     companion object {
         private const val ATTR_VOLUME_ID = 0x08
         private const val ATTR_DIRECTORY = 0x10
@@ -206,6 +212,7 @@ class FastUsbWriter(
         val lfn = buildLfnEntries(name, checksum)
         list.addAll(lfn)
         list.add(buildShortEntry(shortName, firstCluster, sizeBytes, isDirectory))
+        if (isDirectory) totalDirsWritten++ else totalFilesWritten++
     }
 
     /**
