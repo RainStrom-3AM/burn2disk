@@ -33,6 +33,13 @@ class IsoRepository @Inject constructor(
     private val isoDir: File
         get() = File(context.cacheDir, "isos").apply { mkdirs() }
 
+    /** In-memory LRU cache keyed by absolute path; cap at 10 entries. */
+    private val lruCache = object : LinkedHashMap<String, IsoInfo>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, IsoInfo>?): Boolean {
+            return size > 10
+        }
+    }
+
     data class PickedFile(val file: File, val displayName: String, val size: Long)
 
     /**
@@ -71,6 +78,10 @@ class IsoRepository @Inject constructor(
         file: File,
         onChecksumProgress: (Int) -> Unit = {}
     ): IsoInfo = withContext(Dispatchers.IO) {
+        synchronized(lruCache) {
+            lruCache[file.absolutePath]
+        }?.let { return@withContext it }
+
         val detection = runCatching {
             IsoParser(file.absolutePath).use { parser ->
                 parser.open()
@@ -83,7 +94,7 @@ class IsoRepository @Inject constructor(
 
         val sha = checksumCalculator.sha256(file, onChecksumProgress)
 
-        IsoInfo(
+        val info = IsoInfo(
             fileName = file.name,
             path = file.absolutePath,
             sizeBytes = file.length(),
@@ -93,6 +104,8 @@ class IsoRepository @Inject constructor(
             sha256 = sha,
             hasLargeWim = detection.hasLargeWim
         )
+        synchronized(lruCache) { lruCache[file.absolutePath] = info }
+        info
     }
 
     private fun queryNameAndSize(uri: Uri): Pair<String, Long> {

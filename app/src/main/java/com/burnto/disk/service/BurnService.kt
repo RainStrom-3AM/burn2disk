@@ -45,6 +45,7 @@ class BurnService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var burnJob: Job? = null
+    private var stateJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var isoName: String = "ISO"
     private var isSdBurn: Boolean = false
@@ -104,12 +105,13 @@ class BurnService : Service() {
         startForegroundWithNotification(buildNotification("Preparing...", 0, indeterminate = true))
         acquireWakeLock()
 
-        burnEngine.state
+        stateJob = burnEngine.state
             .onEach { state -> updateNotificationFor(state) }
             .launchIn(serviceScope)
 
         burnJob = serviceScope.launch {
             burnEngine.burn(isoFile, deviceId, capacityBytes)
+            stateJob?.cancel()
             stopForegroundCompat()
             stopSelf()
         }
@@ -119,12 +121,13 @@ class BurnService : Service() {
         startForegroundWithNotification(buildNotification("Preparing...", 0, indeterminate = true))
         acquireWakeLock()
 
-        sdCardBurnEngine.state
+        stateJob = sdCardBurnEngine.state
             .onEach { state -> updateNotificationFor(state) }
             .launchIn(serviceScope)
 
         burnJob = serviceScope.launch {
             sdCardBurnEngine.burn(isoFile, sdUri)
+            stateJob?.cancel()
             stopForegroundCompat()
             stopSelf()
         }
@@ -132,6 +135,7 @@ class BurnService : Service() {
 
     private fun cancelBurn() {
         burnJob?.cancel()
+        stateJob?.cancel()
         releaseWakeLock()
         stopForegroundCompat()
         stopSelf()
@@ -168,7 +172,7 @@ class BurnService : Service() {
         val titlePrefix = if (isSdBurn) "Copy to SD" else "Burn Disk"
         return NotificationCompat.Builder(this, Burn2DiskApp.CHANNEL_ID)
             .setContentTitle(titlePrefix)
-            .setContentText("$isoName — $percent%")
+            .setContentText(content)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

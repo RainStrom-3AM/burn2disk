@@ -7,6 +7,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
 import java.net.URL
+import java.util.concurrent.TimeUnit
 
 /**
  * Splits an oversized `install.wim` into FAT32-safe `install.swm` parts.
@@ -131,7 +132,13 @@ class WimSplitter(private val context: Context) {
                     onLine(line)
                 }
             }
-            val exit = process.waitFor()
+            val finished = process.waitFor(10, TimeUnit.MINUTES)
+            val exit = if (finished) process.exitValue() else -1
+            if (!finished) {
+                logBuilder.appendLine("⚠ wimlib-imagex timed out after 10 minutes")
+                onLine("⚠ wimlib-imagex timed out after 10 minutes")
+                process.destroyForcibly()
+            }
             val parts = outputDir.listFiles { f ->
                 f.name.matches(Regex("install\\d*\\.swm", RegexOption.IGNORE_CASE))
             }?.sortedBy { it.name }.orEmpty()

@@ -59,20 +59,18 @@ class IsoDetector {
                 (paths.contains("bootmgr") && paths.contains("boot/bcd")) -> OsType.WINDOWS
 
             // 5. Kali Linux (checked before generic Ubuntu/Debian to avoid false generic match)
-            paths.contains("live/filesystem.squashfs") &&
-                "kali" in volumeLabel -> OsType.KALI
+            (paths.contains("live/filesystem.squashfs") || paths.contains("live/vmlinuz") || paths.contains("live/initrd.img")) &&
+                ("kali" in volumeLabel || paths.any { it.contains("kali") }) -> OsType.KALI
 
             // 6. Linux Mint (checked before generic Ubuntu to avoid false generic match)
             paths.contains("casper/filesystem.squashfs") &&
-                "mint" in volumeLabel -> OsType.MINT
+                ("mint" in volumeLabel || paths.any { it.contains("mint") || it.contains("linuxmint") }) -> OsType.MINT
 
             // 2. Ubuntu / Debian
             paths.contains("casper/filesystem.squashfs") ||
                 paths.contains("casper/filesystem.squashfs.gpg") ||
                 paths.contains("install/filesystem.squashfs") ||
-                paths.any { it.startsWith("dists/") } ||
-                paths.contains("ubuntu") ||
-                paths.contains("debian") -> {
+                paths.any { it.startsWith("dists/") } -> {
                 when {
                     "debian" in volumeLabel -> OsType.DEBIAN
                     else -> OsType.UBUNTU

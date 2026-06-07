@@ -61,7 +61,7 @@ class FastUsbWriter(
     // path -> first cluster of that directory's chain
     private val dirClusterMap = HashMap<String, Long>()
     // path -> accumulated 32-byte directory entries
-    private val dirEntries = HashMap<String, MutableList<ByteArray>>()
+    private val dirEntries = LinkedHashMap<String, MutableList<ByteArray>>()
     // path -> short names already used in that directory (for ~N uniqueness)
     private val usedShortNames = HashMap<String, MutableSet<String>>()
 
@@ -369,12 +369,6 @@ class FastUsbWriter(
             producer.join()
             written
         }
-    }
-
-    /** Bytes a file of [sizeBytes] occupies once padded to whole clusters. */
-    fun paddedClusterBytes(sizeBytes: Long): Int {
-        val clusters = if (sizeBytes == 0L) 1L else (sizeBytes + clusterBytes - 1) / clusterBytes
-        return (clusters * clusterBytes).toInt()
     }
 
     /** Writes every queued directory's entries to its cluster run. */

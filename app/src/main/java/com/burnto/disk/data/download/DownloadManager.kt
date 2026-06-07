@@ -91,7 +91,7 @@ class DownloadManager @Inject constructor(
                 var received = startOffset
                 var lastEmit = 0L
                 var lastBytes = startOffset
-                var lastTime = System.currentTimeMillis()
+                var lastTime = 0L
 
                 body.byteStream().use { input ->
                     java.io.FileOutputStream(partFile, append).use { output ->
@@ -104,7 +104,11 @@ class DownloadManager @Inject constructor(
                             received += read
 
                             val now = System.currentTimeMillis()
-                            if (now - lastEmit >= PROGRESS_INTERVAL_MS) {
+                            if (lastTime == 0L) {
+                                lastTime = now
+                                lastBytes = received
+                                lastEmit = now
+                            } else if (now - lastEmit >= PROGRESS_INTERVAL_MS) {
                                 val secs = (now - lastTime) / 1000f
                                 val speed = if (secs > 0) (received - lastBytes) / secs else 0f
                                 emit(

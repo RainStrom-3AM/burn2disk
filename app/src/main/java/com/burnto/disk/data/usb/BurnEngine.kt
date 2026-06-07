@@ -364,8 +364,8 @@ class BurnEngine @Inject constructor(
                 }
             }
 
-            rawDevice.close()
             raw = null
+            rawDevice.close()
 
             if (mismatches == 0) {
                 emitLog("Verification passed: ${files.size} files OK")
@@ -753,6 +753,10 @@ class BurnEngine @Inject constructor(
             for (entry in sortedFiles) {
                 coroutineContext.ensureActive()
                 val parentPath = entry.fullPath.substringBeforeLast('/', "")
+                if (entry.sizeBytes == 0L) {
+                    writer.addDirectoryEntry(parentPath, entry.name, 0L, 0L, isDirectory = false)
+                    continue
+                }
                 val clusters = clustersFor(entry.sizeBytes)
                 val firstCluster = writer.allocateClusters(clusters)
                 writer.writeFatChain(firstCluster, clusters)
@@ -795,6 +799,10 @@ class BurnEngine @Inject constructor(
             val parentPath = usbPath.substringBeforeLast('/', "")
             val name = usbPath.substringAfterLast('/')
             val size = partFile.length()
+            if (size == 0L) {
+                writer.addDirectoryEntry(parentPath, name, 0L, 0L, isDirectory = false)
+                continue
+            }
             val clusters = clustersFor(size)
             val firstCluster = writer.allocateClusters(clusters)
             writer.writeFatChain(firstCluster, clusters)
