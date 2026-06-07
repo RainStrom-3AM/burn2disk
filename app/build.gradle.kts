@@ -13,8 +13,8 @@ android {
         applicationId = "com.burnto.disk"
         minSdk = 21
         targetSdk = 34
-        versionCode = 19
-        versionName = "1.1.8"
+        versionCode = 20
+        versionName = "1.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -99,6 +99,7 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.hilt.navigation.compose)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.documentfile)
 
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)

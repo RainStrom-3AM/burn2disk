@@ -67,6 +67,7 @@ fun HomeScreen(
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val usbConnected by viewModel.usbConnected.collectAsStateWithLifecycle()
+    val sdCardInfo by viewModel.sdCardInfo.collectAsStateWithLifecycle()
     val formatState by viewModel.formatState.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -217,6 +218,30 @@ fun HomeScreen(
                         text = "Connect a USB drive via OTG to begin",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondary
+                    )
+                }
+            }
+
+            // SD card status line (only shown when present).
+            if (sdCardInfo != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 24.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(SuccessGreen)
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text(
+                        text = "SD card detected · ${com.burnto.disk.ui.Format.bytes(sdCardInfo!!.freeBytes)} free",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = SuccessGreen
                     )
                 }
             }

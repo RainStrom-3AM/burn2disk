@@ -13,6 +13,7 @@ import com.burnto.disk.data.model.DownloadState
 import com.burnto.disk.data.model.IsoInfo
 import com.burnto.disk.data.model.RecentIso
 import com.burnto.disk.data.model.UsbDeviceInfo
+import com.burnto.disk.data.sdcard.SdCardManager
 import com.burnto.disk.data.usb.BurnEngine
 import com.burnto.disk.data.usb.Fat32Formatter
 import com.burnto.disk.data.usb.RawUsbBlockDevice
@@ -60,6 +61,7 @@ class HomeViewModel @Inject constructor(
     private val downloadManager: DownloadManager,
     private val recentIsoStore: RecentIsoStore,
     private val usbDeviceManager: UsbDeviceManager,
+    private val sdCardManager: SdCardManager,
     private val burnEngine: BurnEngine,
     private val session: BurnSession
 ) : ViewModel() {
@@ -79,6 +81,9 @@ class HomeViewModel @Inject constructor(
     // The first connected USB device, refreshed on demand (for Format Disk).
     private val _connectedDevice = MutableStateFlow<UsbDeviceInfo?>(null)
     val connectedDevice: StateFlow<UsbDeviceInfo?> = _connectedDevice.asStateFlow()
+
+    private val _sdCardInfo = MutableStateFlow<com.burnto.disk.data.model.SdCardInfo?>(null)
+    val sdCardInfo: StateFlow<com.burnto.disk.data.model.SdCardInfo?> = _sdCardInfo.asStateFlow()
 
     private val _formatState = MutableStateFlow<FormatUiState>(FormatUiState.Idle)
     val formatState: StateFlow<FormatUiState> = _formatState.asStateFlow()
@@ -100,6 +105,9 @@ class HomeViewModel @Inject constructor(
             }
             _usbConnected.value = devices.isNotEmpty()
             _connectedDevice.value = devices.firstOrNull()
+            _sdCardInfo.value = withContext(Dispatchers.IO) {
+                runCatching { sdCardManager.detectSdCard() }.getOrNull()
+            }
         }
     }
 

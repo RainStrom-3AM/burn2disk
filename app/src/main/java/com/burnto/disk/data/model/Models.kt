@@ -1,5 +1,7 @@
 package com.burnto.disk.data.model
 
+import android.net.Uri
+
 /** Detected operating system family of an ISO image. */
 enum class OsType(val label: String) {
     WINDOWS("Windows"),
@@ -71,6 +73,29 @@ data class UsbDeviceInfo(
         get() = productName.ifBlank { deviceName }
 }
 
+/** Metadata about the physical SD card (not OTG). */
+data class SdCardInfo(
+    val uri: Uri,
+    val displayName: String,
+    val freeBytes: Long,
+    val totalBytes: Long,
+    val filesystem: String
+)
+
+/**
+ * Unified target for a burn operation — either a USB OTG device (raw block write)
+ * or an SD card (file copy via SAF).
+ */
+sealed class BurnTarget {
+    abstract val displayName: String
+    data class UsbOtg(val info: UsbDeviceInfo) : BurnTarget() {
+        override val displayName: String get() = info.displayName
+    }
+    data class SdCard(val info: SdCardInfo) : BurnTarget() {
+        override val displayName: String get() = info.displayName
+    }
+}
+
 /** Streaming download progress for the download engine. */
 sealed class DownloadState {
     data object Idle : DownloadState()
@@ -96,3 +121,6 @@ data class RecentIso(
     val sizeBytes: Long,
     val lastUsedEpochMs: Long
 )
+
+/** Exception carrying a user-facing suggestion for the result screen. */
+class BurnException(message: String, val suggestion: String) : Exception(message)

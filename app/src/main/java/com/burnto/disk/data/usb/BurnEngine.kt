@@ -5,6 +5,7 @@ import android.hardware.usb.UsbManager
 import com.burnto.disk.data.iso.IsoEntry
 import com.burnto.disk.data.iso.IsoParser
 import com.burnto.disk.data.iso.WimSplitter
+import com.burnto.disk.data.model.BurnException
 import com.burnto.disk.data.model.BurnLogLine
 import com.burnto.disk.data.model.BurnState
 import kotlinx.coroutines.CoroutineScope
@@ -1108,6 +1109,4 @@ class BurnEngine @Inject constructor(
         return String.format("%.2f GB", gb)
     }
 
-    /** Internal exception carrying a user-facing suggestion for the result screen. */
-    private class BurnException(message: String, val suggestion: String) : Exception(message)
 }

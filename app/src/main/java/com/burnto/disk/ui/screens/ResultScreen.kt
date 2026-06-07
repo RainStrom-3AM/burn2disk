@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.burnto.disk.data.model.BurnState
+import com.burnto.disk.data.model.BurnTarget
 import com.burnto.disk.data.model.OsType
 import com.burnto.disk.ui.Format
 import com.burnto.disk.ui.theme.Amber
@@ -56,6 +57,9 @@ import com.burnto.disk.viewmodel.BurnViewModel
 /**
  * Screen 6 — Result. Success shows stats + Done/Verify; failure shows a plain
  * English error with a suggested fix and Retry/Report actions.
+ *
+ * For SD card copies the success text is adjusted to reflect that this was a
+ * file copy, not a bootable raw burn.
  */
 @Composable
 fun ResultScreen(
@@ -65,6 +69,7 @@ fun ResultScreen(
 ) {
     val state by viewModel.burnState.collectAsStateWithLifecycle()
     val iso by viewModel.iso.collectAsStateWithLifecycle()
+    val target by viewModel.selectedTarget.collectAsStateWithLifecycle()
     val logLines by viewModel.logLines.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
 
@@ -74,13 +79,8 @@ fun ResultScreen(
         label = "iconScale"
     )
 
-    // Capture the last-known byte total / duration from any non-terminal state so
-    // a forced fallback can still show meaningful stats.
     val fallbackBytes = (state as? BurnState.Copying)?.totalBytes ?: 0L
 
-    // Hard timeout: this screen must never sit on "Finishing..." forever. If a
-    // terminal state has not arrived within 3 seconds, synthesise a success
-    // result from the last-known totals so the user always sees a completed view.
     var forcedSuccess by remember { mutableStateOf<BurnState.Success?>(null) }
     LaunchedEffect(state) {
         if (state !is BurnState.Success && state !is BurnState.Failed) {
@@ -93,13 +93,13 @@ fun ResultScreen(
         }
     }
 
-    // Effective state: a real terminal state takes precedence; otherwise the
-    // forced fallback (if the timeout fired) so we never render a bare screen.
     val effectiveState: BurnState = when {
         state is BurnState.Success || state is BurnState.Failed -> state
         forcedSuccess != null -> forcedSuccess!!
         else -> state
     }
+
+    val isSdBurn = target is BurnTarget.SdCard
 
     Scaffold(containerColor = NearBlack) { padding ->
         Column(
@@ -111,7 +111,12 @@ fun ResultScreen(
             verticalArrangement = Arrangement.Center
         ) {
             when (val s = effectiveState) {
-                is BurnState.Success -> SuccessContent(s, scale, onDone, onVerify = { viewModel.verifyBurn() }, isoInfo = iso)
+                is BurnState.Success -> SuccessContent(
+                    s, scale, onDone,
+                    onVerify = { if (!isSdBurn) viewModel.verifyBurn() },
+                    isoInfo = iso,
+                    isSdBurn = isSdBurn
+                )
                 is BurnState.Failed -> FailureContent(
                     error = s.error,
                     suggestion = s.suggestion,
@@ -129,9 +134,6 @@ fun ResultScreen(
                     }
                 )
                 is BurnState.Verifying -> VerifyingContent(s.progress)
-                // Transitional fallback: a styled "Finishing..." with a green ring
-                // and checkmark — never a bare black void. The 3s timeout above
-                // converts this into a Success view if no terminal state arrives.
                 else -> FinishingContent()
             }
         }
@@ -158,7 +160,8 @@ private fun SuccessContent(
     scale: Float,
     onDone: () -> Unit,
     onVerify: () -> Unit,
-    isoInfo: com.burnto.disk.data.model.IsoInfo? = null
+    isoInfo: com.burnto.disk.data.model.IsoInfo? = null,
+    isSdBurn: Boolean = false
 ) {
     val avgSpeed = if (state.durationSeconds > 0) {
         (state.totalBytes.toFloat() / state.durationSeconds) / (1024 * 1024)
@@ -173,9 +176,29 @@ private fun SuccessContent(
             .scale(scale)
     )
     Spacer(Modifier.height(24.dp))
-    Text("Burn complete", style = MaterialTheme.typography.headlineLarge, color = Color.White, fontWeight = FontWeight.Bold)
+    Text(
+        if (isSdBurn) "Copy complete" else "Burn complete",
+        style = MaterialTheme.typography.headlineLarge,
+        color = Color.White,
+        fontWeight = FontWeight.Bold
+    )
     Spacer(Modifier.height(8.dp))
-    Text("Your USB drive is ready to boot", style = MaterialTheme.typography.bodyLarge, color = TextSecondary)
+    Text(
+        if (isSdBurn) "ISO contents copied to SD card" else "Your USB drive is ready to boot",
+        style = MaterialTheme.typography.bodyLarge,
+        color = TextSecondary
+    )
+
+    if (isSdBurn) {
+        Spacer(Modifier.height(8.dp))
+        val isoName = isoInfo?.fileName?.substringBeforeLast('.') ?: "ISO"
+        Text(
+            "Location: SD Card/$isoName/",
+            style = MonoText.medium,
+            color = Amber,
+            textAlign = TextAlign.Center
+        )
+    }
 
     Spacer(Modifier.height(32.dp))
 
@@ -196,16 +219,18 @@ private fun SuccessContent(
 
     Spacer(Modifier.height(12.dp))
 
-    OutlinedButton(
-        onClick = onVerify,
-        modifier = Modifier.fillMaxWidth().height(56.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber),
-        border = androidx.compose.foundation.BorderStroke(1.5.dp, Amber)
-    ) { Text("VERIFY", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+    if (!isSdBurn) {
+        OutlinedButton(
+            onClick = onVerify,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber),
+            border = androidx.compose.foundation.BorderStroke(1.5.dp, Amber)
+        ) { Text("VERIFY", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+    }
 
     Spacer(Modifier.height(16.dp))
-    if (isoInfo?.osType == OsType.WINDOWS) {
+    if (!isSdBurn && isoInfo?.osType == OsType.WINDOWS) {
         Text(
             text = buildString {
                 append("Windows USB created. Boot in UEFI mode for best results.")
@@ -214,7 +239,7 @@ private fun SuccessContent(
                 }
             },
             style = MaterialTheme.typography.bodyMedium,
-            color = com.burnto.disk.ui.theme.Amber,
+            color = Amber,
             textAlign = TextAlign.Center
         )
     }

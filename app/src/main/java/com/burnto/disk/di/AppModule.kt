@@ -4,6 +4,8 @@ import android.content.Context
 import com.burnto.disk.data.iso.ChecksumCalculator
 import com.burnto.disk.data.iso.IsoDetector
 import com.burnto.disk.data.iso.WimSplitter
+import com.burnto.disk.data.sdcard.SdCardBurnEngine
+import com.burnto.disk.data.sdcard.SdCardManager
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -41,6 +43,16 @@ object AppModule {
     @Provides
     @Singleton
     fun provideIsoDetector(): IsoDetector = IsoDetector()
+
+    @Provides
+    @Singleton
+    fun provideSdCardManager(@ApplicationContext context: Context): SdCardManager =
+        SdCardManager(context)
+
+    @Provides
+    @Singleton
+    fun provideSdCardBurnEngine(@ApplicationContext context: Context): SdCardBurnEngine =
+        SdCardBurnEngine(context)
 
     @Provides
     @Singleton

@@ -59,7 +59,7 @@ fun BurnProgressScreen(
 ) {
     val state by viewModel.burnState.collectAsStateWithLifecycle()
     val iso by viewModel.iso.collectAsStateWithLifecycle()
-    val device by viewModel.selectedDevice.collectAsStateWithLifecycle()
+    val target by viewModel.selectedTarget.collectAsStateWithLifecycle()
     val logLines by viewModel.logLines.collectAsStateWithLifecycle()
 
     var logExpanded by remember { mutableStateOf(false) }
@@ -177,7 +177,7 @@ fun BurnProgressScreen(
                 Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = TextSecondary)
                 Spacer(Modifier.size(8.dp))
                 Text(
-                    text = device?.displayName?.take(18) ?: "USB",
+                    text = target?.displayName?.take(18) ?: "USB",
                     style = MonoText.small,
                     color = Color.White,
                     maxLines = 1
@@ -247,7 +247,10 @@ fun BurnProgressScreen(
             title = { Text("Cancel burn?", color = Color.White) },
             text = {
                 Text(
-                    "Cancel burn? USB may be left in an unusable state.",
+                    if (target is com.burnto.disk.data.model.BurnTarget.SdCard)
+                        "Cancel copy? Partial files will remain on the SD card."
+                    else
+                        "Cancel burn? USB may be left in an unusable state.",
                     color = TextSecondary
                 )
             },

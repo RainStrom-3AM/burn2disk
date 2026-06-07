@@ -6,6 +6,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -14,6 +15,8 @@ import com.burnto.disk.Burn2DiskApp
 import com.burnto.disk.MainActivity
 import com.burnto.disk.R
 import com.burnto.disk.data.model.BurnState
+import com.burnto.disk.data.model.BurnTarget
+import com.burnto.disk.data.sdcard.SdCardBurnEngine
 import com.burnto.disk.data.usb.BurnEngine
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -31,18 +34,20 @@ import kotlinx.coroutines.Dispatchers
  * Foreground service that runs the burn off the UI lifecycle, holds a wake lock
  * so the burn survives screen-off, and surfaces progress through a notification.
  *
- * The actual work lives in [BurnEngine]; this service is the Android lifecycle
- * host and the wake-lock / notification owner.
+ * Routes to [BurnEngine] for USB OTG raw-block writes and to [SdCardBurnEngine]
+ * for SAF-based SD card file copies.
  */
 @AndroidEntryPoint
 class BurnService : Service() {
 
     @Inject lateinit var burnEngine: BurnEngine
+    @Inject lateinit var sdCardBurnEngine: SdCardBurnEngine
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var burnJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var isoName: String = "ISO"
+    private var isSdBurn: Boolean = false
 
     companion object {
         const val ACTION_START = "com.burnto.disk.action.START_BURN"
@@ -51,6 +56,10 @@ class BurnService : Service() {
         const val EXTRA_ISO_NAME = "iso_name"
         const val EXTRA_DEVICE_ID = "device_id"
         const val EXTRA_CAPACITY = "capacity_bytes"
+        const val EXTRA_TARGET_TYPE = "target_type"
+        const val EXTRA_SD_URI = "sd_uri"
+        const val TYPE_USB = "usb"
+        const val TYPE_SD = "sd"
         private const val NOTIFICATION_ID = 1001
     }
 
@@ -63,8 +72,23 @@ class BurnService : Service() {
                 val deviceId = intent.getIntExtra(EXTRA_DEVICE_ID, -1)
                 val capacity = intent.getLongExtra(EXTRA_CAPACITY, 0L)
                 isoName = intent.getStringExtra(EXTRA_ISO_NAME) ?: "ISO"
-                if (path != null && deviceId != -1) {
-                    startBurn(File(path), deviceId, capacity)
+                val targetType = intent.getStringExtra(EXTRA_TARGET_TYPE) ?: TYPE_USB
+                isSdBurn = targetType == TYPE_SD
+                if (path != null) {
+                    if (isSdBurn) {
+                        val sdUri = intent.getStringExtra(EXTRA_SD_URI)?.let { Uri.parse(it) }
+                        if (sdUri != null) {
+                            startSdBurn(File(path), sdUri)
+                        } else {
+                            stopSelf()
+                        }
+                    } else {
+                        if (deviceId != -1) {
+                            startUsbBurn(File(path), deviceId, capacity)
+                        } else {
+                            stopSelf()
+                        }
+                    }
                 } else {
                     stopSelf()
                 }
@@ -76,19 +100,31 @@ class BurnService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startBurn(isoFile: File, deviceId: Int, capacityBytes: Long) {
+    private fun startUsbBurn(isoFile: File, deviceId: Int, capacityBytes: Long) {
         startForegroundWithNotification(buildNotification("Preparing...", 0, indeterminate = true))
         acquireWakeLock()
 
-        // Mirror engine state into the notification.
         burnEngine.state
             .onEach { state -> updateNotificationFor(state) }
             .launchIn(serviceScope)
 
         burnJob = serviceScope.launch {
             burnEngine.burn(isoFile, deviceId, capacityBytes)
-            // Keep the service alive briefly so the terminal state is observed,
-            // then tear down.
+            stopForegroundCompat()
+            stopSelf()
+        }
+    }
+
+    private fun startSdBurn(isoFile: File, sdUri: Uri) {
+        startForegroundWithNotification(buildNotification("Preparing...", 0, indeterminate = true))
+        acquireWakeLock()
+
+        sdCardBurnEngine.state
+            .onEach { state -> updateNotificationFor(state) }
+            .launchIn(serviceScope)
+
+        burnJob = serviceScope.launch {
+            sdCardBurnEngine.burn(isoFile, sdUri)
             stopForegroundCompat()
             stopSelf()
         }
@@ -106,13 +142,13 @@ class BurnService : Service() {
             is BurnState.Idle -> Triple("Preparing...", 0, true)
             is BurnState.Formatting -> Triple("Formatting FAT32...", state.progress, false)
             is BurnState.Copying -> Triple(
-                "Writing files — ${state.percent}%",
+                if (isSdBurn) "Copying files — ${state.percent}%" else "Writing files — ${state.percent}%",
                 state.percent,
                 false
             )
             is BurnState.Verifying -> Triple("Verifying...", state.progress, false)
-            is BurnState.Success -> Triple("Burn complete", 100, false)
-            is BurnState.Failed -> Triple("Burn failed", 0, false)
+            is BurnState.Success -> Triple(if (isSdBurn) "Copy complete" else "Burn complete", 100, false)
+            is BurnState.Failed -> Triple(if (isSdBurn) "Copy failed" else "Burn failed", 0, false)
         }
         val notif = buildNotification(text, percent, indeterminate)
         notificationManager().notify(NOTIFICATION_ID, notif)
@@ -129,9 +165,10 @@ class BurnService : Service() {
             else PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val titlePrefix = if (isSdBurn) "Copy to SD" else "Burn Disk"
         return NotificationCompat.Builder(this, Burn2DiskApp.CHANNEL_ID)
-            .setContentTitle("Burn Disk")
-            .setContentText("Burning $isoName to USB — $percent%")
+            .setContentTitle(titlePrefix)
+            .setContentText("$isoName — $percent%")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -152,8 +189,6 @@ class BurnService : Service() {
     @Suppress("DEPRECATION")
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        // PARTIAL_WAKE_LOCK keeps the CPU running through screen-off; the burn
-        // screen separately keeps the display on via FLAG_KEEP_SCREEN_ON.
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Burn2Disk::BurnWakeLock").apply {
             setReferenceCounted(false)
             acquire(60 * 60 * 1000L) // 1 hour safety timeout
