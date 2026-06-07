@@ -74,7 +74,7 @@ class IsoRepository @Inject constructor(
         val detection = runCatching {
             IsoParser(file.absolutePath).use { parser ->
                 parser.open()
-                detector.detect(parser.listAllEntries(), file.length())
+                detector.detect(parser.listAllEntries(), parser.volumeLabel, parser.systemIdentifier, file.length())
             }
         }.getOrElse {
             // Fall back to filename-based heuristics if parsing fails (e.g. raw .img).

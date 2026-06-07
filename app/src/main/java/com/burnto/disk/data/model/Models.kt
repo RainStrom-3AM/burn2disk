@@ -3,10 +3,14 @@ package com.burnto.disk.data.model
 /** Detected operating system family of an ISO image. */
 enum class OsType(val label: String) {
     WINDOWS("Windows"),
-    UBUNTU_DEBIAN("Ubuntu / Debian"),
-    FEDORA_RHEL("Fedora / RHEL"),
+    UBUNTU("Ubuntu"),
+    DEBIAN("Debian"),
+    FEDORA("Fedora / RHEL"),
     ARCH("Arch Linux"),
-    GENERIC("Unknown / Generic")
+    KALI("Kali Linux"),
+    MINT("Linux Mint"),
+    LINUX_GENERIC("Linux"),
+    UNKNOWN("Unknown / Generic")
 }
 
 /** Boot firmware support detected inside an ISO. */
@@ -37,7 +41,7 @@ data class IsoInfo(
     val fileName: String,
     val path: String,
     val sizeBytes: Long,
-    val osType: OsType = OsType.GENERIC,
+    val osType: OsType = OsType.UNKNOWN,
     val bootType: BootType = BootType.UNKNOWN,
     val architecture: Architecture = Architecture.UNKNOWN,
     val sha256: String? = null,

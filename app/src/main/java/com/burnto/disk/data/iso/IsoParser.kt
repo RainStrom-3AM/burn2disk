@@ -64,6 +64,12 @@ class IsoParser(private val raf: RandomAccessFile) : Closeable {
     private var rootRecordJoliet: DirRecord? = null
     private var usingJoliet = false
 
+    private var _volumeLabel: String = ""
+    val volumeLabel: String get() = _volumeLabel
+
+    private var _systemIdentifier: String = ""
+    val systemIdentifier: String get() = _systemIdentifier
+
     /** Raw root directory record, parsed from the volume descriptors. */
     private data class DirRecord(
         val extentLba: Long,
@@ -90,7 +96,11 @@ class IsoParser(private val raf: RandomAccessFile) : Closeable {
             }
 
             when (type) {
-                VD_PRIMARY -> rootRecord = readRootRecord(sector)
+                VD_PRIMARY -> {
+                    rootRecord = readRootRecord(sector)
+                    _systemIdentifier = readString(sector, 8, 32)
+                    _volumeLabel = readString(sector, 40, 32)
+                }
                 VD_SUPPLEMENTARY -> {
                     if (isJoliet(sector)) {
                         rootRecordJoliet = readRootRecord(sector)
@@ -122,6 +132,13 @@ class IsoParser(private val raf: RandomAccessFile) : Closeable {
             }
         }
         return false
+    }
+
+    private fun readString(buffer: ByteBuffer, offset: Int, length: Int): String {
+        val arr = ByteArray(length)
+        buffer.position(offset)
+        buffer.get(arr)
+        return String(arr, Charsets.US_ASCII).trimEnd()
     }
 
     private fun readRootRecord(descriptor: ByteBuffer): DirRecord {

@@ -37,11 +37,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.burnto.disk.data.model.BurnState
+import com.burnto.disk.data.model.OsType
 import com.burnto.disk.ui.Format
 import com.burnto.disk.ui.theme.Amber
 import com.burnto.disk.ui.theme.DangerRed
@@ -62,6 +64,7 @@ fun ResultScreen(
     viewModel: BurnViewModel = hiltViewModel()
 ) {
     val state by viewModel.burnState.collectAsStateWithLifecycle()
+    val iso by viewModel.iso.collectAsStateWithLifecycle()
     val logLines by viewModel.logLines.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
 
@@ -108,7 +111,7 @@ fun ResultScreen(
             verticalArrangement = Arrangement.Center
         ) {
             when (val s = effectiveState) {
-                is BurnState.Success -> SuccessContent(s, scale, onDone, onVerify = { viewModel.verifyBurn() })
+                is BurnState.Success -> SuccessContent(s, scale, onDone, onVerify = { viewModel.verifyBurn() }, isoInfo = iso)
                 is BurnState.Failed -> FailureContent(
                     error = s.error,
                     suggestion = s.suggestion,
@@ -154,7 +157,8 @@ private fun SuccessContent(
     state: BurnState.Success,
     scale: Float,
     onDone: () -> Unit,
-    onVerify: () -> Unit
+    onVerify: () -> Unit,
+    isoInfo: com.burnto.disk.data.model.IsoInfo? = null
 ) {
     val avgSpeed = if (state.durationSeconds > 0) {
         (state.totalBytes.toFloat() / state.durationSeconds) / (1024 * 1024)
@@ -199,6 +203,21 @@ private fun SuccessContent(
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber),
         border = androidx.compose.foundation.BorderStroke(1.5.dp, Amber)
     ) { Text("VERIFY", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+
+    Spacer(Modifier.height(16.dp))
+    if (isoInfo?.osType == OsType.WINDOWS) {
+        Text(
+            text = buildString {
+                append("Windows USB created. Boot in UEFI mode for best results.")
+                if (isoInfo.hasLargeWim) {
+                    append(" If install.wim was over 4GB it has been split into .swm files — Windows Setup handles these automatically.")
+                }
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = com.burnto.disk.ui.theme.Amber,
+            textAlign = TextAlign.Center
+        )
+    }
 }
 
 @Composable
