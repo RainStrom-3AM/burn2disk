@@ -4,6 +4,7 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.burnto.disk.data.sdcard.SdCardManager
 import com.burnto.disk.data.usb.RawUsbBlockDevice
 import com.burnto.disk.data.usb.UsbDeviceManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -17,6 +18,7 @@ import kotlinx.coroutines.withContext
 import me.jahnen.libaums.core.fs.FileSystem
 import me.jahnen.libaums.core.fs.UsbFile
 import me.jahnen.libaums.core.fs.fat32.Fat32FileSystem
+import java.io.File
 import javax.inject.Inject
 
 /** One entry (file or directory) in the USB file browser. */
@@ -33,12 +35,18 @@ sealed class BrowseState {
     data object NoDevice : BrowseState()
     data object RequestingPermission : BrowseState()
     data class Error(val message: String) : BrowseState()
+    data class PickSource(val usbLabel: String, val sdLabel: String) : BrowseState()
     data class Listing(
         val path: String,
         val entries: List<UsbFileEntry>,
         val totalFiles: Int,
         val totalBytes: Long
     ) : BrowseState()
+}
+
+sealed class BrowseSource {
+    data object Usb : BrowseSource()
+    data class SdCard(val root: File) : BrowseSource()
 }
 
 /**
@@ -53,7 +61,8 @@ sealed class BrowseState {
 @HiltViewModel
 class UsbBrowserViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val usbDeviceManager: UsbDeviceManager
+    private val usbDeviceManager: UsbDeviceManager,
+    private val sdCardManager: SdCardManager
 ) : ViewModel() {
 
     private val usbManager: UsbManager =
@@ -67,6 +76,7 @@ class UsbBrowserViewModel @Inject constructor(
 
     private var raw: RawUsbBlockDevice? = null
     private var fs: FileSystem? = null
+    private val _browseSource = MutableStateFlow<BrowseSource?>(null)
 
     // Directory navigation stack of relative paths ("" == root).
     private val backStack = ArrayDeque<String>()
@@ -75,41 +85,82 @@ class UsbBrowserViewModel @Inject constructor(
     private var driveFiles = 0
     private var driveBytes = 0L
 
-    /** Mounts the first connected USB device and lists the root directory. */
+    /** Smart-open: USB only opens USB, SD only opens SD, both show a source picker. */
     fun open() {
         viewModelScope.launch {
             _state.value = BrowseState.Loading
 
-            // --- Step 1: find the device ---
+            val usbDevices = runCatching { usbDeviceManager.rawDevices() }.getOrDefault(emptyList())
+            val sdCards = runCatching { sdCardManager.getAvailableSdCardRoots() }.getOrDefault(emptyList())
+
+            when {
+                usbDevices.isEmpty() && sdCards.isEmpty() -> _state.value = BrowseState.NoDevice
+                usbDevices.isNotEmpty() && sdCards.isEmpty() -> openUsb(usbDevices.first())
+                usbDevices.isEmpty() && sdCards.isNotEmpty() -> openSdCard(sdCards.first())
+                else -> _state.value = BrowseState.PickSource(
+                    usbLabel = usbDevices.first().usbDevice.productName ?: "USB Drive",
+                    sdLabel = sdCards.first().label
+                )
+            }
+        }
+    }
+
+    fun openUsbExplicit() {
+        viewModelScope.launch {
             val devices = runCatching { usbDeviceManager.rawDevices() }.getOrDefault(emptyList())
             if (devices.isEmpty()) {
                 _state.value = BrowseState.NoDevice
                 return@launch
             }
-            val msd = devices.first()
-            val usbDevice = msd.usbDevice
-            _deviceName.value = runCatching {
-                usbDevice.productName ?: usbDevice.manufacturerName ?: "USB Drive"
-            }.getOrDefault("USB Drive")
-
-            // --- Step 2: ensure USB permission (suspends on the system dialog) ---
-            if (!usbManager.hasPermission(usbDevice)) {
-                _state.value = BrowseState.RequestingPermission
-                val granted = runCatching { usbDeviceManager.requestPermission(usbDevice) }
-                    .getOrDefault(false)
-                if (!granted) {
-                    _state.value = BrowseState.Error(
-                        "USB permission denied. Tap BROWSE USB again and allow access."
-                    )
-                    return@launch
-                }
-            }
-
-            // --- Step 3: open + mount + list (off the main thread) ---
-            _state.value = BrowseState.Loading
-            val result = withContext(Dispatchers.IO) { mountAndScan(usbDevice) }
-            _state.value = result
+            openUsb(devices.first())
         }
+    }
+
+    fun openSdCardExplicit() {
+        viewModelScope.launch {
+            val cards = runCatching { sdCardManager.getAvailableSdCardRoots() }.getOrDefault(emptyList())
+            if (cards.isEmpty()) {
+                _state.value = BrowseState.NoDevice
+                return@launch
+            }
+            openSdCard(cards.first())
+        }
+    }
+
+    private suspend fun openUsb(msd: me.jahnen.libaums.core.UsbMassStorageDevice) {
+        closeUsbHandles()
+        _browseSource.value = BrowseSource.Usb
+        val usbDevice = msd.usbDevice
+        _deviceName.value = runCatching {
+            usbDevice.productName ?: usbDevice.manufacturerName ?: "USB Drive"
+        }.getOrDefault("USB Drive")
+
+        if (!usbManager.hasPermission(usbDevice)) {
+            _state.value = BrowseState.RequestingPermission
+            val granted = runCatching { usbDeviceManager.requestPermission(usbDevice) }.getOrDefault(false)
+            if (!granted) {
+                _state.value = BrowseState.Error("USB permission denied. Tap BROWSE USB again and allow access.")
+                return
+            }
+        }
+
+        _state.value = BrowseState.Loading
+        val result = withContext(Dispatchers.IO) { mountAndScan(usbDevice) }
+        _state.value = result
+    }
+
+    private suspend fun openSdCard(sdCard: SdCardManager.SdCardRoot) {
+        closeUsbHandles()
+        _browseSource.value = BrowseSource.SdCard(sdCard.path)
+        _deviceName.value = sdCard.label
+        backStack.clear()
+        backStack.addLast("")
+        _state.value = BrowseState.Loading
+        val result = withContext(Dispatchers.IO) {
+            runCatching { sdListing(sdCard.path, "") }
+                .getOrElse { BrowseState.Error(it.message ?: "Failed to read SD card") }
+        }
+        _state.value = result
     }
 
     private fun mountAndScan(usbDevice: android.hardware.usb.UsbDevice): BrowseState {
@@ -162,6 +213,36 @@ class UsbBrowserViewModel @Inject constructor(
         return BrowseState.Listing(path, entries, driveFiles, driveBytes)
     }
 
+    private fun sdListing(root: File, relativePath: String): BrowseState {
+        val dir = if (relativePath.isEmpty()) root else File(root, relativePath)
+        if (!dir.exists() || !dir.isDirectory) throw java.io.IOException("Path not found: /$relativePath")
+        val entries = (dir.listFiles() ?: emptyArray())
+            .map { file ->
+                UsbFileEntry(
+                    name = file.name,
+                    path = if (relativePath.isEmpty()) file.name else "$relativePath/${file.name}",
+                    isDirectory = file.isDirectory,
+                    sizeBytes = if (file.isDirectory) 0L else file.length()
+                )
+            }
+            .sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+
+        var totalFiles = 0
+        var totalBytes = 0L
+        fun walk(file: File, depth: Int) {
+            if (depth > 32) return
+            if (file.isDirectory) {
+                file.listFiles()?.forEach { walk(it, depth + 1) }
+            } else {
+                totalFiles++
+                totalBytes += file.length()
+            }
+        }
+        walk(root, 0)
+
+        return BrowseState.Listing(relativePath, entries, totalFiles, totalBytes)
+    }
+
     private fun resolveDir(mounted: FileSystem, path: String): UsbFile {
         val root = mounted.rootDirectory
         if (path.isEmpty()) return root
@@ -189,7 +270,12 @@ class UsbBrowserViewModel @Inject constructor(
             _state.value = BrowseState.Loading
             backStack.addLast(entry.path)
             val result = withContext(Dispatchers.IO) {
-                runCatching { listing(entry.path) }.getOrElse {
+                runCatching {
+                    when (val source = _browseSource.value) {
+                        is BrowseSource.SdCard -> sdListing(source.root, entry.path)
+                        else -> listing(entry.path)
+                    }
+                }.getOrElse {
                     BrowseState.Error(it.message ?: "Could not open folder")
                 }
             }
@@ -204,7 +290,12 @@ class UsbBrowserViewModel @Inject constructor(
             while (backStack.isNotEmpty() && backStack.last() != path) backStack.removeLast()
             if (backStack.isEmpty()) backStack.addLast("")
             val result = withContext(Dispatchers.IO) {
-                runCatching { listing(path) }.getOrElse {
+                runCatching {
+                    when (val source = _browseSource.value) {
+                        is BrowseSource.SdCard -> sdListing(source.root, path)
+                        else -> listing(path)
+                    }
+                }.getOrElse {
                     BrowseState.Error(it.message ?: "Could not open folder")
                 }
             }
@@ -223,7 +314,12 @@ class UsbBrowserViewModel @Inject constructor(
         viewModelScope.launch {
             _state.value = BrowseState.Loading
             val result = withContext(Dispatchers.IO) {
-                runCatching { listing(target) }.getOrElse {
+                runCatching {
+                    when (val source = _browseSource.value) {
+                        is BrowseSource.SdCard -> sdListing(source.root, target)
+                        else -> listing(target)
+                    }
+                }.getOrElse {
                     BrowseState.Error(it.message ?: "Could not open folder")
                 }
             }
@@ -232,10 +328,14 @@ class UsbBrowserViewModel @Inject constructor(
         return true
     }
 
-    override fun onCleared() {
-        super.onCleared()
+    private fun closeUsbHandles() {
         runCatching { raw?.close() }
         raw = null
         fs = null
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        closeUsbHandles()
     }
 }

@@ -102,6 +102,8 @@ class BurnService : Service() {
     }
 
     private fun startUsbBurn(isoFile: File, deviceId: Int, capacityBytes: Long) {
+        burnJob?.cancel()
+        stateJob?.cancel()
         startForegroundWithNotification(buildNotification("Preparing...", 0, indeterminate = true))
         acquireWakeLock()
 
@@ -118,6 +120,8 @@ class BurnService : Service() {
     }
 
     private fun startSdBurn(isoFile: File, sdUri: Uri) {
+        burnJob?.cancel()
+        stateJob?.cancel()
         startForegroundWithNotification(buildNotification("Preparing...", 0, indeterminate = true))
         acquireWakeLock()
 
@@ -214,6 +218,8 @@ class BurnService : Service() {
     }
 
     override fun onDestroy() {
+        burnJob?.cancel()
+        stateJob?.cancel()
         releaseWakeLock()
         serviceScope.cancel()
         super.onDestroy()

@@ -34,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,6 +71,12 @@ fun IsoSourceScreen(
     val downloadState by viewModel.downloadState.collectAsStateWithLifecycle()
     val recent by viewModel.recent.collectAsStateWithLifecycle()
     var url by remember { mutableStateOf("") }
+
+    LaunchedEffect(downloadState) {
+        if (downloadState is DownloadState.Completed) {
+            onSourceReady()
+        }
+    }
 
     // System file picker filtered to disk images.
     val pickLauncher = rememberLauncherForActivityResult(
@@ -172,7 +179,6 @@ fun IsoSourceScreen(
                                     color = Amber,
                                     style = MaterialTheme.typography.bodySmall
                                 )
-                                onSourceReady()
                             }
                             else -> StartDownloadButton(url) { viewModel.startDownload(url) }
                         }

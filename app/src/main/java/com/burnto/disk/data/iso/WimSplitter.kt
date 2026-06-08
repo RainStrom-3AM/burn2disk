@@ -44,7 +44,7 @@ class WimSplitter(private val context: Context) {
     /** True if this device's primary ABI has a bundled binary we can run. */
     fun isSupportedAbi(): Boolean {
         val abis = Build.SUPPORTED_ABIS
-        return abis.any { it == "arm64-v8a" || it == "armeabi-v7a" }
+        return abis.any { it == "arm64-v8a" }
     }
 
     /**

@@ -477,7 +477,7 @@ class FastUsbWriter(
         entry[11] = (if (isDirectory) ATTR_DIRECTORY else ATTR_ARCHIVE).toByte()
         bb.putShort(20, ((firstCluster shr 16) and 0xFFFF).toShort())
         bb.putShort(26, (firstCluster and 0xFFFF).toShort())
-        bb.putInt(28, if (isDirectory) 0 else sizeBytes.toInt())
+        bb.putInt(28, if (isDirectory) 0 else (sizeBytes and 0xFFFFFFFFL).toInt())
         stampTimes(bb)
         return entry
     }

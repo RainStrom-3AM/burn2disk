@@ -220,6 +220,7 @@ class IsoParser(private val raf: RandomAccessFile) : Closeable {
                     // Records do not span sector boundaries; the rest is padding.
                     break
                 }
+                if (recordLen < ROOT_DIR_RECORD_LEN || offset + recordLen > SECTOR_SIZE) break
                 parseRecord(sector, offset, parentPath)?.let { out.add(it) }
                 offset += recordLen
             }

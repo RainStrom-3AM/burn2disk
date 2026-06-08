@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.SdCard
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -129,9 +130,15 @@ fun BrowseUsbScreen(
                     is BrowseState.Loading -> BusyGroup("Reading USB drive...")
                     is BrowseState.RequestingPermission -> BusyGroup("Waiting for permission...")
                     is BrowseState.NoDevice -> ErrorContent(
-                        message = "No USB drive connected",
-                        helper = "Connect a USB drive via OTG and tap Retry",
+                        message = "No drive connected",
+                        helper = "Connect a USB drive or SD card and tap Retry",
                         onRetry = viewModel::open
+                    )
+                    is BrowseState.PickSource -> SourcePickerContent(
+                        usbLabel = current.usbLabel,
+                        sdLabel = current.sdLabel,
+                        onUsb = viewModel::openUsbExplicit,
+                        onSd = viewModel::openSdCardExplicit
                     )
                     is BrowseState.Error -> {
                         val msg = current.message
@@ -167,6 +174,44 @@ fun BrowseUsbScreen(
                         .padding(16.dp)
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun SourcePickerContent(
+    usbLabel: String,
+    sdLabel: String,
+    onUsb: () -> Unit,
+    onSd: () -> Unit
+) {
+    Column(
+        modifier = Modifier.padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text("Choose a drive to browse", style = MaterialTheme.typography.titleMedium, color = Color.White)
+        OutlinedButton(
+            onClick = onUsb,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber),
+            border = BorderStroke(1.dp, Amber)
+        ) {
+            Icon(Icons.Filled.Usb, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.size(8.dp))
+            Text(usbLabel)
+        }
+        OutlinedButton(
+            onClick = onSd,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber),
+            border = BorderStroke(1.dp, Amber)
+        ) {
+            Icon(Icons.Filled.SdCard, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.size(8.dp))
+            Text(sdLabel)
         }
     }
 }

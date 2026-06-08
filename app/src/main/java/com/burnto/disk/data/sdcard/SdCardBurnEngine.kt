@@ -5,13 +5,17 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.burnto.disk.data.iso.IsoParser
 import com.burnto.disk.data.model.BurnException
+import com.burnto.disk.data.model.BurnLogLine
 import com.burnto.disk.data.model.BurnState
 import com.burnto.disk.ui.Format
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -39,6 +43,9 @@ class SdCardBurnEngine @Inject constructor(
 
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
+
+    private val _log = MutableSharedFlow<BurnLogLine>(replay = 200, extraBufferCapacity = 256)
+    val log: SharedFlow<BurnLogLine> = _log.asSharedFlow()
 
     fun resetState() {
         _state.value = BurnState.Idle
@@ -166,7 +173,8 @@ class SdCardBurnEngine @Inject constructor(
         _state.value = BurnState.Success(totalBytes, durationSec)
     }
 
-    private fun emitLog(message: String) {
+    private fun emitLog(message: String, isFileName: Boolean = false, isWarning: Boolean = false) {
         _logLines.value = (_logLines.value + message).takeLast(500)
+        _log.tryEmit(BurnLogLine(message, isFileName, isWarning))
     }
 }

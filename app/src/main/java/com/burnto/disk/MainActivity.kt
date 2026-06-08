@@ -1,5 +1,6 @@
 package com.burnto.disk
 
+import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -17,6 +18,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.navigation
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.activity.result.ActivityResultLauncher
+import androidx.core.app.ActivityCompat
 import com.burnto.disk.ui.navigation.Routes
 import com.burnto.disk.ui.screens.BurnProgressScreen
 import com.burnto.disk.ui.screens.BrowseUsbScreen
@@ -47,6 +49,14 @@ class MainActivity : ComponentActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                0
+            )
         }
 
         setContent {

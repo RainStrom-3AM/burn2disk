@@ -29,6 +29,13 @@ class SdCardManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
 
+    data class SdCardRoot(
+        val path: File,
+        val label: String,
+        val totalBytes: Long,
+        val freeBytes: Long
+    )
+
     companion object {
         private const val PREFS_NAME = "sd_card_prefs"
         private const val KEY_SD_URI = "sd_card_uri"
@@ -111,6 +118,56 @@ class SdCardManager @Inject constructor(
         }
 
         return null
+    }
+
+    /** Returns directly readable removable-storage roots for the smart browser. */
+    fun getAvailableSdCardRoots(): List<SdCardRoot> {
+        val roots = LinkedHashMap<String, SdCardRoot>()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            val storageManager = context.getSystemService(Context.STORAGE_SERVICE) as? StorageManager
+            storageManager?.storageVolumes?.forEach { volume ->
+                if (!volume.isRemovable || volume.isEmulated) return@forEach
+                val path = getVolumePath(volume) ?: return@forEach
+                if (!path.exists() || !path.isDirectory) return@forEach
+                roots[path.absolutePath] = SdCardRoot(
+                    path = path,
+                    label = volume.getDescription(context) ?: "SD Card",
+                    totalBytes = path.totalSpace,
+                    freeBytes = path.freeSpace
+                )
+            }
+        }
+
+        context.getExternalFilesDirs(null).drop(1).forEach { dir ->
+            val rootPath = dir?.absolutePath?.substringBefore("/Android/data") ?: return@forEach
+            if (rootPath.isBlank()) return@forEach
+            val root = File(rootPath)
+            if (!root.exists() || !root.isDirectory) return@forEach
+            roots.putIfAbsent(
+                root.absolutePath,
+                SdCardRoot(
+                    path = root,
+                    label = "SD Card",
+                    totalBytes = root.totalSpace,
+                    freeBytes = root.freeSpace
+                )
+            )
+        }
+
+        return roots.values.toList()
+    }
+
+    fun hasDirectBrowseTarget(): Boolean = getAvailableSdCardRoots().isNotEmpty()
+
+    private fun getVolumePath(volume: StorageVolume): File? {
+        return try {
+            val method = StorageVolume::class.java.getMethod("getPath")
+            val path = method.invoke(volume) as? String ?: return null
+            File(path)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun readVolumeStats(volume: StorageVolume, storageManager: StorageManager): Pair<Long, Long> {

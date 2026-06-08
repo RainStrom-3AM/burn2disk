@@ -13,6 +13,7 @@ import com.burnto.disk.data.model.BurnTarget
 import com.burnto.disk.data.model.IsoInfo
 import com.burnto.disk.data.model.RecentIso
 import com.burnto.disk.data.model.UsbDeviceInfo
+import com.burnto.disk.data.sdcard.SdCardBurnEngine
 import com.burnto.disk.data.sdcard.SdCardManager
 import com.burnto.disk.data.usb.BurnEngine
 import com.burnto.disk.data.usb.UsbDeviceManager
@@ -24,6 +25,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -37,14 +40,21 @@ class BurnViewModel @Inject constructor(
     private val usbDeviceManager: UsbDeviceManager,
     private val sdCardManager: SdCardManager,
     private val burnEngine: BurnEngine,
+    private val sdCardBurnEngine: SdCardBurnEngine,
     private val session: BurnSession
 ) : ViewModel() {
 
     val iso: StateFlow<IsoInfo?> = session.iso
-    val burnState: StateFlow<BurnState> = burnEngine.state
+    val burnState: StateFlow<BurnState> = combine(
+        burnEngine.state,
+        sdCardBurnEngine.state,
+        session.target
+    ) { usbState, sdState, target ->
+        if (target is BurnTarget.SdCard) sdState else usbState
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, BurnState.Idle)
 
     /** Accumulated burn-log lines for the collapsible log view. */
-    val logLines: StateFlow<List<BurnLogLine>> = burnEngine.log
+    val logLines: StateFlow<List<BurnLogLine>> = merge(burnEngine.log, sdCardBurnEngine.log)
         .scan(emptyList<BurnLogLine>()) { acc, line -> (acc + line).takeLast(500) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -80,6 +90,7 @@ class BurnViewModel @Inject constructor(
         val isoInfo = session.iso.value ?: return
         val target = session.target.value ?: return
         burnEngine.resetState()
+        sdCardBurnEngine.resetState()
         val intent = Intent(context, BurnService::class.java).apply {
             action = BurnService.ACTION_START
             putExtra(BurnService.EXTRA_ISO_PATH, isoInfo.path)
@@ -124,6 +135,7 @@ class BurnViewModel @Inject constructor(
 
     fun resetBurn() {
         burnEngine.resetState()
+        sdCardBurnEngine.resetState()
         session.clearTarget()
     }
 }

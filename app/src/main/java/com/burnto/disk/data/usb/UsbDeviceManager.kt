@@ -107,10 +107,15 @@ class UsbDeviceManager @Inject constructor(
         if (usbManager.hasPermission(device)) return true
 
         return suspendCancellableCoroutine { cont ->
+            var delivered = false
+
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(ctx: Context, intent: Intent) {
                     if (intent.action != ACTION_USB_PERMISSION) return
-                    context.unregisterReceiver(this)
+                    if (!delivered) {
+                        delivered = true
+                        runCatching { context.unregisterReceiver(this) }
+                    }
                     val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                     if (cont.isActive) cont.resume(granted)
                 }
@@ -122,7 +127,7 @@ class UsbDeviceManager @Inject constructor(
                 PendingIntent.FLAG_UPDATE_CURRENT
             }
             val pi = PendingIntent.getBroadcast(
-                context, 0, Intent(ACTION_USB_PERMISSION).setPackage(context.packageName), flags
+                context, device.deviceId, Intent(ACTION_USB_PERMISSION).setPackage(context.packageName), flags
             )
 
             val filter = IntentFilter(ACTION_USB_PERMISSION)
@@ -133,7 +138,12 @@ class UsbDeviceManager @Inject constructor(
                 context.registerReceiver(receiver, filter)
             }
 
-            cont.invokeOnCancellation { runCatching { context.unregisterReceiver(receiver) } }
+            cont.invokeOnCancellation {
+                if (!delivered) {
+                    delivered = true
+                    runCatching { context.unregisterReceiver(receiver) }
+                }
+            }
             usbManager.requestPermission(device, pi)
         }
     }
